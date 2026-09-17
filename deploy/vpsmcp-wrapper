@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# /usr/local/bin/vpsmcp - always run as the service account so file permissions
+# behave the same as they do for the daemon. `setup` is the exception: it needs root.
+[[ "${1:-}" == setup ]] && exec /opt/vpsmcp/.venv/bin/python -m vpsmcp "$@"
+exec sudo -u vpsmcp /opt/vpsmcp/.venv/bin/python -m vpsmcp "$@"
