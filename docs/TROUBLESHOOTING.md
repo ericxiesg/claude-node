@@ -10,6 +10,7 @@ Run `sudo deploy/healthcheck.sh` first; it reports which layer is broken.
 | `Permission denied for user X` | sshd rejects public keys, wrong account, allowlist | [ssh-auth](#ssh-auth) |
 | `Host key verification failed` | wrong `known_hosts`, or the machine changed | [hostkey](#hostkey) |
 | Claude cannot connect | resource URL mismatch or broken discovery | [claude](#claude) |
+| Kimi / GLM / another client cannot finish signing in | its callback URL is not allowed | [client](#client) |
 | Caddy never gets a certificate | DNS not live, port 80 blocked | [cert](#cert) |
 | Service restarts in a loop | bad config, crash on start | [crashloop](#crashloop) |
 | Tool call times out | wrong execution shape | [timeout](#timeout) |
@@ -147,10 +148,60 @@ Common causes:
 - `resource` does not match the URL typed into Claude. `VPSMCP_PUBLIC_URL` is a
   bare origin with no path; the resource URL is that plus `VPSMCP_MCP_PATH`.
 - `--lock-anthropic` is on while you use Claude Code, which connects from your
-  own IP.
+  own IP - or any client other than Claude on the web.
 - The proxy buffers the stream. nginx needs `proxy_buffering off` and long
   timeouts; Caddy needs `flush_interval -1`. `gen-caddyfile.sh` gets this right.
 - `/oauth/authorize` is unreachable from your browser because it was IP-locked.
+
+---
+
+## <a name="client"></a>A client cannot finish signing in
+
+The client adds the URL, the sign-in page appears or not, and it never comes back
+connected. Almost always the callback: the gateway only sends an authorization
+code to a URL on its allowlist, and no vendor callback is guessed in advance.
+
+```bash
+sudo vpsmcp clients      # which clients are on, and their callbacks
+sudo vpsmcp redirects    # what was refused, verbatim
+```
+
+If the client appears under "refused callbacks", allow that exact URL:
+
+```bash
+sudo vpsmcp redirect allow https://<the-url-it-printed>
+```
+
+It applies immediately - no restart - and the client can retry at once. Allow only
+a URL you recognise: whoever owns it receives the authorization code. Remove one
+again with `sudo vpsmcp redirect deny <uri>`.
+
+Nothing in the refused list, and the client still fails:
+
+```bash
+U=https://mcp.example.com
+curl -s $U/.well-known/oauth-authorization-server     | head -c 200; echo
+curl -s $U/.well-known/oauth-authorization-server/mcp | head -c 200; echo
+curl -s $U/healthz
+```
+
+- Both discovery forms must answer; a client that treats the resource URL as the
+  issuer uses the second one.
+- `--lock-anthropic` blocks every non-Anthropic client, Kimi and GLM included.
+  Regenerate without it (`sudo vpsmcp caddyfile -o /etc/caddy/Caddyfile --reload`)
+  or add the network with `--allow-cidr`.
+- A client that refuses to register without a client secret gets one if it asks
+  for `client_secret_post` or `client_secret_basic`; a client that cannot do PKCE
+  needs `VPSMCP_REQUIRE_PKCE=0`, and one that posts JSON to `/token` needs
+  `VPSMCP_LENIENT_TOKEN_BODY=1`. Both weaken the flow: set them only for the
+  client that needs them, and check `sudo journalctl -u vpsmcp -n 50` first to see
+  which step actually failed.
+
+The audit log records every refusal with its reason:
+
+```bash
+sudo grep oauth /var/lib/vpsmcp/audit.jsonl | tail -20
+```
 
 ---
 

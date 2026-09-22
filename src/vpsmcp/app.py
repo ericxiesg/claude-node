@@ -100,6 +100,7 @@ def build(settings: Settings) -> tuple[FastMCP, Runtime]:
             "hosts": len(inv.hosts),
             "resource": settings.resource_url,
             "issuer": settings.issuer,
+            "clients": list(settings.clients),
             "connections": len(rt.pool.stats()),
         })
 

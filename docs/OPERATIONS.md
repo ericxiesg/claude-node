@@ -16,6 +16,9 @@ sudo vpsmcp nodes --json
 sudo vpsmcp hosts                 # TSV inventory, for scripts
 sudo vpsmcp grants                # who holds a valid grant
 sudo vpsmcp revoke <client_id>    # revoke a client and all its tokens
+sudo vpsmcp clients               # MCP clients accepted (Claude, Kimi, GLM, ...)
+sudo vpsmcp redirects             # callback allowlist + callbacks turned away
+sudo vpsmcp redirect allow <uri>  # accept one more client, no restart
 sudo vpsmcp hash-password         # new admin password hash
 
 sudo tail -f /var/lib/vpsmcp/audit.jsonl | jq
@@ -145,7 +148,9 @@ through `caddy validate` after.
 | `/mcp`, `/.well-known/*`, `/oauth/token`, `/oauth/register`, `/oauth/revoke` | Anthropic backend | yes |
 | `/oauth/authorize`, `/oauth/login` | your browser | no |
 
-Do not use it at all if you use Claude Code, which connects from your own machine.
+Do not use it at all if you use Claude Code, which connects from your own machine,
+or Kimi or GLM, whose egress ranges are not published - the lock blocks them
+outright. `--allow-cidr <cidr>` (repeatable) adds networks you do know.
 
 ## Upgrade
 
@@ -218,4 +223,5 @@ Left for you to do by hand:
 - certificate: `rm -rf /var/lib/caddy/.local/share/caddy/certificates/*/mcp.*`
 - DNS: delete the A record
 - node accounts: `userdel -r ops`
-- Claude: Settings → Connectors → remove the connector
+- the client: remove the connector / MCP server entry (Claude: Settings →
+  Connectors)

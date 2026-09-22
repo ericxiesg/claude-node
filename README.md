@@ -1,7 +1,7 @@
 # VPS Fleet MCP
 
-Turn a fleet of VPS hosts into one remote MCP service for Claude. Pure SSH, no
-agent on the managed machines.
+Turn a fleet of VPS hosts into one remote MCP service for Claude, Kimi or GLM.
+Pure SSH, no agent on the managed machines.
 
 English · [中文](docs/README_ZH.md)
 
@@ -32,16 +32,37 @@ Unattended:
 sudo deploy/install.sh --domain mcp.example.com -y [--self-enroll] [--lock-anthropic]
 ```
 
-## 2. Connect Claude
+## 2. Connect a client
 
-Settings → Connectors → add a custom connector with the URL the installer printed:
+One URL, the one the installer printed, for every client:
 
 ```
 https://mcp.example.com/mcp
 ```
 
-Sign in on your own consent page and approve. Start with `fleet.read` and
-`fleet.exec` only.
+- **Claude** - Settings → Connectors → add a custom connector.
+- **Kimi** - add an MCP server and paste the same URL.
+- **GLM / Z.ai** - same: add an MCP server with that URL.
+
+Each one sends you to your own sign-in page; approve there and it is connected.
+Start with `fleet.read` and `fleet.exec` only.
+
+```bash
+sudo vpsmcp clients      # which clients are accepted, and where each calls back
+sudo vpsmcp redirects    # callbacks that were turned away, and how to allow one
+```
+
+A client is accepted when its OAuth callback is in the allowlist. Claude, Kimi and
+GLM are built in (`VPSMCP_CLIENTS=claude,local,kimi,glm`). Any other client - or a
+vendor that moves its callback - is one command away:
+
+```bash
+sudo vpsmcp redirect allow https://example.ai/api/mcp/callback
+```
+
+`vpsmcp redirects` prints the exact URL that was refused, so nothing has to be
+guessed; it applies immediately, with no restart. Allow only a URL you recognise:
+that is where the authorization code is sent.
 
 ## 3. Add nodes
 
@@ -86,6 +107,13 @@ sudo vpsmcp node rename  <node_id|alias> <new-alias>
 sudo vpsmcp node tags    <node_id|alias> a,b
 sudo vpsmcp check                                  # connectivity to every node
 sudo deploy/healthcheck.sh                         # layered health check
+
+sudo vpsmcp clients                                # accepted MCP clients
+sudo vpsmcp redirects                              # callback allowlist + refusals
+sudo vpsmcp redirect allow <uri>                   # accept one more client
+sudo vpsmcp redirect deny  <uri>
+sudo vpsmcp grants                                 # who holds a live token
+sudo vpsmcp revoke <client_id>
 ```
 
 Aliases may repeat. Identity is `node_id` (hash of address:port:user); pass it
@@ -122,6 +150,9 @@ then deletes its own config.
    into issued tokens.
 3. Command guardrails catch accidents, not attacks. The real boundary is the
    unprivileged SSH account on each node - do not give it sudo.
+4. `--lock-anthropic` restricts the API endpoints to Anthropic's egress range, so
+   it blocks Kimi, GLM and Claude Code. Leave it off unless Claude on the web is
+   your only client (`--allow-cidr` adds networks of your own).
 
 ## License
 

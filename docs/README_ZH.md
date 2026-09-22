@@ -1,6 +1,6 @@
 # VPS Fleet MCP
 
-把多台 VPS 聚合成一个远程 MCP 服务挂到 Claude 上。纯 SSH，被管机器零改造。
+把多台 VPS 聚合成一个远程 MCP 服务，挂到 Claude、Kimi 或 GLM 上。纯 SSH，被管机器零改造。
 
 [English](../README.md) · 中文
 
@@ -26,15 +26,36 @@ sudo deploy/install.sh
 sudo deploy/install.sh --domain mcp.example.com -y [--self-enroll] [--lock-anthropic]
 ```
 
-## 2. 接入 Claude
+## 2. 接入客户端
 
-设置 → 连接器 → 添加自定义连接器，URL 填安装器打印的那个：
+所有客户端都填同一个 URL，就是安装器打印的那个：
 
 ```
 https://mcp.example.com/mcp
 ```
 
-在你自己的登录页登录并批准。第一次只勾 `fleet.read` + `fleet.exec`。
+- **Claude**：设置 → 连接器 → 添加自定义连接器。
+- **Kimi**：添加 MCP 服务器，粘贴同一个 URL。
+- **GLM / Z.ai**：同上，添加 MCP 服务器填这个 URL。
+
+每个客户端都会跳到你自己的登录页，登录并批准即接上。第一次只勾
+`fleet.read` + `fleet.exec`。
+
+```bash
+sudo vpsmcp clients      # 当前放行哪些客户端，各自的回调地址
+sudo vpsmcp redirects    # 被拒的回调，以及放行它的命令
+```
+
+能不能接上，只取决于客户端的 OAuth 回调地址在不在白名单里。Claude、Kimi、GLM
+内置（`VPSMCP_CLIENTS=claude,local,kimi,glm`）。别的客户端，或者厂商换了回调地址，
+一条命令：
+
+```bash
+sudo vpsmcp redirect allow https://example.ai/api/mcp/callback
+```
+
+`vpsmcp redirects` 会把被拒的那个 URL 原样打出来，不用猜；加完立即生效，不用重启。
+只放行你认得的地址——授权码就是发到那里去的。
 
 ## 3. 加节点
 
@@ -78,6 +99,13 @@ sudo vpsmcp node rename  <node_id|别名> <新别名>
 sudo vpsmcp node tags    <node_id|别名> a,b
 sudo vpsmcp check                                  # 逐台连通性
 sudo deploy/healthcheck.sh                         # 分层体检
+
+sudo vpsmcp clients                                # 放行的客户端
+sudo vpsmcp redirects                              # 回调白名单 + 被拒记录
+sudo vpsmcp redirect allow <uri>                   # 再放行一个客户端
+sudo vpsmcp redirect deny  <uri>
+sudo vpsmcp grants                                 # 谁手上有活的令牌
+sudo vpsmcp revoke <client_id>
 ```
 
 别名允许重名。身份是 `node_id`（address:port:user 的哈希），重名时传它。
@@ -104,11 +132,13 @@ sudo deploy/uninstall.sh
 
 顺序不能反：网关会趁自己还能用，先把公钥从各台节点摘掉，再删本机配置。
 
-## 三点
+## 四点
 
 1. CLI 一律 `sudo vpsmcp ...`。包装器会切到服务账号，权限行为和守护进程一致。
 2. 客户端授权之后不要改资源 URL——它已经绑进签发的令牌里了。
 3. 命令护栏防手滑不防攻击。真正的边界是节点上那个无特权 SSH 账号，别给它 sudo。
+4. `--lock-anthropic` 只放行 Anthropic 的出口网段，等于把 Kimi、GLM、Claude Code
+   全挡掉。只有「只用网页版 Claude」时才开（`--allow-cidr` 可以再加你自己的网段）。
 
 ## 许可证
 

@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS auth_codes (
     redirect_uri  TEXT NOT NULL,
     scope         TEXT NOT NULL,
     challenge     TEXT NOT NULL,
+    challenge_method TEXT NOT NULL DEFAULT 'S256',
     resource      TEXT,
     subject       TEXT NOT NULL,
     expires_at    INTEGER NOT NULL,
@@ -50,7 +51,29 @@ CREATE TABLE IF NOT EXISTS login_attempts (
     fails         INTEGER NOT NULL DEFAULT 0,
     locked_until  INTEGER NOT NULL DEFAULT 0
 );
+-- redirect_uri prefixes added at runtime (`vpsmcp redirect allow`), merged with
+-- the ones from the client profiles and VPSMCP_ALLOWED_REDIRECTS.
+CREATE TABLE IF NOT EXISTS redirect_allow (
+    prefix        TEXT PRIMARY KEY,
+    note          TEXT,
+    created_at    INTEGER NOT NULL
+);
+-- callbacks that were refused, so a new client can be allowed by copying a
+-- command instead of guessing the vendor's URL.
+CREATE TABLE IF NOT EXISTS redirect_rejects (
+    uri           TEXT PRIMARY KEY,
+    client_name   TEXT,
+    hits          INTEGER NOT NULL DEFAULT 1,
+    first_seen    INTEGER NOT NULL,
+    last_seen     INTEGER NOT NULL
+);
 """
+
+# Columns added after 1.0. CREATE TABLE IF NOT EXISTS leaves an existing table
+# alone, so a new column has to be added explicitly.
+MIGRATIONS = (
+    ("auth_codes", "challenge_method", "TEXT NOT NULL DEFAULT 'S256'"),
+)
 
 
 def sha(s: str) -> str:
@@ -65,7 +88,14 @@ class Store:
         self._lock = threading.RLock()
         with self._lock:
             self._db.executescript(SCHEMA)
+            self._migrate()
             self._db.commit()
+
+    def _migrate(self) -> None:
+        for table, column, decl in MIGRATIONS:
+            cols = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
+            if cols and column not in cols:
+                self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     def _x(self, sql: str, args: tuple = ()) -> sqlite3.Cursor:
         with self._lock:
@@ -107,9 +137,10 @@ class Store:
     def put_code(self, code: str, **f: Any) -> None:
         self._x(
             "INSERT INTO auth_codes(code_hash,client_id,redirect_uri,scope,challenge,"
-            "resource,subject,expires_at) VALUES(?,?,?,?,?,?,?,?)",
+            "challenge_method,resource,subject,expires_at) VALUES(?,?,?,?,?,?,?,?,?)",
             (sha(code), f["client_id"], f["redirect_uri"], f["scope"], f["challenge"],
-             f.get("resource"), f["subject"], f["expires_at"]),
+             f.get("challenge_method") or "none", f.get("resource"), f["subject"],
+             f["expires_at"]),
         )
 
     def take_code(self, code: str) -> dict | None:
@@ -133,6 +164,13 @@ class Store:
             "expires_at,created_at) VALUES(?,?,?,?,?,?,?,?)",
             (sha(token), family, client_id, subject, scope, resource, expires_at, int(time.time())),
         )
+
+    def refresh_owner(self, token: str) -> str | None:
+        """Which client a refresh token belongs to, without consuming it: the
+        confidential-client check has to happen before rotation."""
+        rows = self._q("SELECT client_id FROM refresh_tokens WHERE token_hash=?",
+                       (sha(token),))
+        return rows[0]["client_id"] if rows else None
 
     def take_refresh(self, token: str) -> dict | None:
         h = sha(token)
@@ -189,9 +227,52 @@ class Store:
     def login_ok(self, ip: str) -> None:
         self._x("DELETE FROM login_attempts WHERE ip=?", (ip,))
 
+    # ---------- redirect allowlist ----------
+    def allow_redirect(self, prefix: str, note: str = "") -> None:
+        self._x("INSERT OR REPLACE INTO redirect_allow(prefix,note,created_at) VALUES(?,?,?)",
+                (prefix, note, int(time.time())))
+        self._x("DELETE FROM redirect_rejects WHERE uri=? OR uri LIKE ?", (prefix, prefix + "%"))
+
+    def disallow_redirect(self, prefix: str) -> bool:
+        return self._x("DELETE FROM redirect_allow WHERE prefix=?", (prefix,)).rowcount > 0
+
+    def redirect_prefixes(self) -> tuple[str, ...]:
+        return tuple(r["prefix"] for r in
+                     self._q("SELECT prefix FROM redirect_allow ORDER BY created_at"))
+
+    def redirect_allow_rows(self) -> list[dict]:
+        return [dict(r) for r in
+                self._q("SELECT * FROM redirect_allow ORDER BY created_at")]
+
+    def note_rejected_redirect(self, uri: str, client_name: str = "", cap: int = 200) -> None:
+        """Remember a refused callback so it can be allowed by copying a command.
+        Written from unauthenticated requests, so distinct URIs are capped; known
+        ones keep counting."""
+        now, uri = int(time.time()), uri[:400]
+        hit = self._x(
+            "UPDATE redirect_rejects SET hits=hits+1, last_seen=?,"
+            " client_name=COALESCE(NULLIF(?,''), client_name) WHERE uri=?",
+            (now, client_name[:120], uri),
+        ).rowcount
+        if hit:
+            return
+        n = self._q("SELECT COUNT(*) AS n FROM redirect_rejects")[0]["n"]
+        if n >= cap:
+            return
+        self._x("INSERT INTO redirect_rejects(uri,client_name,hits,first_seen,last_seen)"
+                " VALUES(?,?,1,?,?)", (uri, client_name[:120], now, now))
+
+    def rejected_redirects(self, limit: int = 20) -> list[dict]:
+        return [dict(r) for r in self._q(
+            "SELECT * FROM redirect_rejects ORDER BY last_seen DESC LIMIT ?", (limit,))]
+
+    def clear_rejected_redirects(self) -> None:
+        self._x("DELETE FROM redirect_rejects")
+
     # ---------- gc ----------
     def gc(self) -> None:
         now = int(time.time())
         self._x("DELETE FROM auth_codes WHERE expires_at < ?", (now - 3600,))
         self._x("DELETE FROM refresh_tokens WHERE expires_at < ?", (now - 86400,))
         self._x("DELETE FROM login_sessions WHERE expires_at < ?", (now,))
+        self._x("DELETE FROM redirect_rejects WHERE last_seen < ?", (now - 30 * 86400,))

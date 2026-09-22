@@ -172,7 +172,11 @@ def selftest(public_url: str, mcp_path: str, bind: str, timeout: int = 30) -> in
          lambda r: r.status_code == 200 and r.json().get("resource") == resource),
         ("authorization server metadata", f"{public_url}/.well-known/oauth-authorization-server",
          lambda r: r.status_code == 200
-         and r.json().get("code_challenge_methods_supported") == ["S256"]),
+         and "S256" in (r.json().get("code_challenge_methods_supported") or [])),
+        # clients that treat the resource URL as the issuer look here (RFC 8414)
+        ("authorization server metadata (path form)",
+         f"{public_url}/.well-known/oauth-authorization-server{mcp_path}",
+         lambda r: r.status_code == 200 and r.json().get("issuer") == public_url),
     ]
     with httpx.Client(timeout=10, follow_redirects=False) as c:
         for name, url, pred in checks:
@@ -330,6 +334,8 @@ def run(argv: list[str]) -> int:
         "VPSMCP_KNOWN_HOSTS": str(ETC / "known_hosts"),
         "VPSMCP_STRICT_HOST_KEYS": "1",
         "VPSMCP_ADMIN_USER": admin_user,
+        # which MCP clients may complete a login; see `vpsmcp clients`
+        "VPSMCP_CLIENTS": existing.get("VPSMCP_CLIENTS", "claude,local,kimi,glm"),
         "VPSMCP_ADMIN_PASSWORD_HASH": existing.get("VPSMCP_ADMIN_PASSWORD_HASH", ""),
         "VPSMCP_ENROLL_MODE": existing.get("VPSMCP_ENROLL_MODE", "open"),
         "VPSMCP_ENROLL_KEY": existing.get("VPSMCP_ENROLL_KEY", ""),
@@ -443,8 +449,11 @@ def _finish(domain, mcp_path, bind_host, bind_port, email, admin_user,
             good, msg = caddymod.apt_install()
             (ok if good else bad)(f"Caddy {msg}")
         if caddymod.installed():
+            allow_cidrs = tuple(argv[i + 1] for i, a in enumerate(argv)
+                                if a == "--allow-cidr" and i + 1 < len(argv))
             conf = caddymod.render(host=domain, upstream=bind, mcp_path=mcp_path, email=email,
-                                   lock_anthropic=flag("--lock-anthropic"))
+                                   lock_anthropic=flag("--lock-anthropic"),
+                                   allow_cidrs=allow_cidrs)
             good, msg = caddymod.write(conf)
             (ok if good else bad)(msg)
             if good:
@@ -473,8 +482,12 @@ def _finish(domain, mcp_path, bind_host, bind_port, email, admin_user,
         print(f"{C['b']}Admin password (shown once - save it now){C['x']}")
         print(f"    username  {admin_user}")
         print(f"    password  {generated_password}\n")
-    print(f"{C['b']}Add a custom connector in Claude with this URL:{C['x']}")
-    print(f"    {public_url}{mcp_path}\n")
+    print(f"{C['b']}Add a custom MCP connector with this URL:{C['x']}")
+    print(f"    {public_url}{mcp_path}")
+    dim("Claude: Settings -> Connectors. Kimi and GLM: add an MCP server with the")
+    dim("same URL, sign in on the page it opens, then approve the scopes.")
+    dim("`sudo vpsmcp clients` lists the clients accepted; if one is turned away")
+    dim("because of its callback URL, `sudo vpsmcp redirects` prints it.\n")
     print(f"{C['b']}Enroll a node (run on the target machine):{C['x']}")
     print(f"    curl -sSf {public_url}/enroll/install.sh | sudo bash")
     print(f"    curl -sSf {public_url}/enroll/install.sh | sudo bash -s -- --alias web-01 --tags prod\n")
