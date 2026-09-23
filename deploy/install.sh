@@ -5,7 +5,7 @@
 #   sudo deploy/install.sh --domain mcp.example.com -y     # unattended
 #
 # setup flags: --domain --admin-user --password --email --port --mcp-path
-#              --self-enroll --lock-anthropic --no-caddy -y
+#              --self-enroll --lock-anthropic --allow-cidr <cidr> --no-caddy -y
 set -euo pipefail
 
 # Re-exec under sudo so setup can read SUDO_USER for the default admin name.

@@ -11,6 +11,10 @@
     vpsmcp node rename|tags|approve ...
     vpsmcp grants                   active OAuth grants
     vpsmcp revoke <client_id>       revoke a client and its tokens
+    vpsmcp clients                  MCP clients this gateway accepts
+    vpsmcp redirects                effective callback allowlist and refused callbacks
+    vpsmcp redirect allow <uri>     allow one more callback, no restart
+    vpsmcp redirect deny  <uri>
     vpsmcp hash-password            generate VPSMCP_ADMIN_PASSWORD_HASH
 """
 from __future__ import annotations
@@ -20,6 +24,7 @@ import getpass
 import json
 import logging
 import os
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -109,6 +114,7 @@ def cmd_check() -> int:
     s = Settings.from_env()
     print(f"issuer       : {s.issuer}")
     print(f"resource URL : {s.resource_url}")
+    print(f"clients      : {', '.join(s.clients) or '(none)'}")
     print(f"data dir     : {s.data_dir}")
     print(f"ssh key      : {s.ssh_key_path}  exists={s.ssh_key_path.exists()}")
     print(f"known_hosts  : {s.known_hosts_path}  strict={s.strict_host_keys}")
@@ -141,13 +147,19 @@ def cmd_caddyfile(argv: list[str]) -> int:
     def opt(n, d=""):
         return argv[argv.index(n) + 1] if n in argv and argv.index(n) + 1 < len(argv) else d
 
+    def opts(n):
+        """Every --flag <value> pair, so --allow-cidr can be repeated."""
+        return tuple(argv[i + 1] for i, a in enumerate(argv)
+                     if a == n and i + 1 < len(argv))
+
     s = Settings.from_env()
     host = s.public_url.split("://", 1)[-1].split("/")[0]
     conf = caddymod.render(
         host=host, upstream=f"{s.bind_host}:{s.bind_port}", mcp_path=s.mcp_path,
         email=opt("--email") or None, log_file=opt("--log-file") or None,
         lock_anthropic="--lock-anthropic" in argv,
-        route53_zone=opt("--dns-route53") or None)
+        route53_zone=opt("--dns-route53") or None,
+        allow_cidrs=opts("--allow-cidr"))
     out = opt("-o") or opt("--out")
     if not out:
         print(conf)
@@ -285,6 +297,121 @@ def cmd_node(argv: list[str]) -> int:
     return 2
 
 
+def _safe(text: str, limit: int = 300) -> str:
+    """Anything a client sent is printed through this: no control characters (an
+    ANSI escape would rewrite the terminal), length capped."""
+    s = "".join(ch if ch.isprintable() else "?" for ch in str(text or ""))
+    return s[:limit] + ("..." if len(s) > limit else "")
+
+
+def _oauth_store():
+    from .auth.store import Store
+    s = Settings.from_env()
+    return s, Store(s.data_dir / "oauth.db")
+
+
+def cmd_clients(argv: list[str]) -> int:
+    """Which MCP clients may complete a login, and where each one calls back."""
+    from .auth.clients import PROFILES, unknown_keys
+
+    s, store = _oauth_store()
+    on = [k.strip().lower() for k in s.clients]
+    if "--json" in argv:
+        print(json.dumps({
+            "enabled": on,
+            "profiles": {k: {"name": v.name, "redirects": list(v.redirects),
+                             "enabled": k in on} for k, v in PROFILES.items()},
+            "extra_redirects": list(s.extra_redirect_prefixes),
+            "runtime_redirects": list(store.redirect_prefixes()),
+        }, ensure_ascii=False, indent=2))
+        return 0
+    print(f"resource URL : {s.resource_url}    <- enter this in the client\n")
+    print(f"{'CLIENT':<10}{'STATE':<10}{'NAME':<26}CALLBACKS")
+    for key, prof in PROFILES.items():
+        state = "on" if key in on else "off"
+        print(f"{key:<10}{state:<10}{prof.name:<26}{prof.redirects[0]}")
+        for extra in prof.redirects[1:]:
+            print(f"{'':<46}{extra}")
+        if prof.notes:
+            print(f"{'':<20}{prof.notes}")
+    bad = unknown_keys(s.clients)
+    if bad:
+        print(f"\nVPSMCP_CLIENTS has unknown entries, ignored: {', '.join(bad)}")
+    print("\nTurn one on or off with VPSMCP_CLIENTS in /etc/vpsmcp/vpsmcp.env, "
+          "then restart:\n    sudo systemctl restart vpsmcp")
+    return 0
+
+
+def cmd_redirects(argv: list[str]) -> int:
+    """Callbacks that would be accepted now, and the ones that were turned away."""
+    from .auth.clients import profile_for_redirect
+
+    s, store = _oauth_store()
+    runtime = store.redirect_prefixes()
+    rejected = store.rejected_redirects()
+    if "--json" in argv:
+        print(json.dumps({"allowed": list(s.allowed_redirect_prefixes) + list(runtime),
+                          "runtime": store.redirect_allow_rows(),
+                          "rejected": rejected}, ensure_ascii=False, indent=2))
+        return 0
+    print("allowed callback prefixes")
+    for pre in s.allowed_redirect_prefixes:
+        prof = profile_for_redirect(pre, s.clients)
+        print(f"  {pre:<52}{prof.key if prof else 'VPSMCP_ALLOWED_REDIRECTS'}")
+    for row in store.redirect_allow_rows():
+        note = f"  ({_safe(row['note'], 40)})" if row["note"] else ""
+        print(f"  {_safe(row['prefix'], 52):<52}added by hand{note}")
+    if not rejected:
+        print("\nNo refused callbacks recorded.")
+        return 0
+    print(f"\nrefused callbacks ({len(rejected)}) - a client that cannot finish "
+          f"authorizing shows up here")
+    for r in rejected:
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(r["last_seen"]))
+        print(f"  {when}  x{r['hits']:<4}{_safe(r['client_name'], 60) or '?'}")
+        print(f"    {_safe(r['uri'], 400)}")
+    print("\nAllow one (it is where the authorization code is sent - only a URL you "
+          "recognise):")
+    # shell-quoted: the URL came from a client and this line gets pasted into a shell
+    print(f"    sudo vpsmcp redirect allow {shlex.quote(_safe(rejected[0]['uri'], 400))}")
+    return 0
+
+
+def cmd_redirect(argv: list[str]) -> int:
+    sub = argv[2] if len(argv) > 2 else ""
+    uri = argv[3] if len(argv) > 3 else ""
+    s, store = _oauth_store()
+    if sub == "allow" and uri:
+        if not uri.startswith("https://") and not uri.startswith("http://127.0.0.1") \
+                and not uri.startswith("http://localhost"):
+            print("a callback must be https, or http on a loopback address",
+                  file=sys.stderr)
+            return 2
+        store.allow_redirect(uri, note=f"added {time.strftime('%Y-%m-%d')}")
+        print(f"allowed {uri}")
+        print("Takes effect immediately; the allowlist is read per request.")
+        return 0
+    if sub == "deny" and uri:
+        if store.disallow_redirect(uri):
+            print(f"removed {uri}")
+            print("Prefixes from the client profiles and VPSMCP_ALLOWED_REDIRECTS are "
+                  "not stored here; change VPSMCP_CLIENTS or the env file for those.")
+            return 0
+        print(f"{uri} is not a hand-added prefix; `vpsmcp redirects` lists them",
+              file=sys.stderr)
+        return 1
+    if sub == "clear-rejected":
+        store.clear_rejected_redirects()
+        print("cleared the refused-callback list")
+        return 0
+    print("""usage:
+  vpsmcp redirects [--json]
+  vpsmcp redirect allow <uri>
+  vpsmcp redirect deny  <uri>
+  vpsmcp redirect clear-rejected""", file=sys.stderr)
+    return 2
+
+
 def cmd_grants() -> int:
     from .auth.store import Store
 
@@ -344,6 +471,12 @@ def _dispatch(cmd: str, argv: list[str]) -> int:
         return cmd_nodes(argv)
     if cmd == "node":
         return cmd_node(argv)
+    if cmd == "clients":
+        return cmd_clients(argv)
+    if cmd == "redirects":
+        return cmd_redirects(argv)
+    if cmd == "redirect":
+        return cmd_redirect(argv)
     if cmd == "grants":
         return cmd_grants()
     if cmd == "revoke":

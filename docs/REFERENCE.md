@@ -103,12 +103,13 @@ which is world-readable).
 
 | Path | Auth | Caller |
 |---|---|---|
-| `/mcp` | Bearer JWT | Claude |
-| `/.well-known/oauth-protected-resource[/mcp]` | none | Claude |
-| `/.well-known/oauth-authorization-server`, `/.well-known/openid-configuration` | none | Claude |
-| `/oauth/register` | none (DCR) | Claude |
+| `/mcp` | Bearer JWT | the client |
+| `/.well-known/oauth-protected-resource[/mcp]` | none | the client |
+| `/.well-known/oauth-authorization-server`, `/.well-known/openid-configuration` | none | the client |
+| the same two with `/mcp` inserted or appended (RFC 8414 path forms) | none | clients that treat the resource URL as the issuer |
+| `/oauth/register` | none (DCR) | the client |
 | `/oauth/authorize`, `/oauth/login` | password | your browser |
-| `/oauth/token`, `/oauth/revoke`, `/oauth/jwks.json` | per spec | Claude |
+| `/oauth/token`, `/oauth/revoke`, `/oauth/jwks.json` | per spec | the client |
 | `/enroll/pubkey`, `/enroll/register` | enrollment gate | new nodes |
 | `/enroll/install.sh`, `/enroll/uninstall.sh` | none (scripts hold no secret) | nodes |
 | `/enroll/deregister` | none; a node can only remove itself (source IP + user + port) | nodes |
@@ -117,7 +118,47 @@ which is world-readable).
 `--lock-anthropic` restricts the endpoints only the Anthropic backend calls to
 its egress range. It must not cover `/oauth/authorize`, `/oauth/login` or
 `/enroll/*`, and must not be used at all with Claude Code, which connects from
-your own machine.
+your own machine. It also blocks Kimi and GLM, whose egress ranges are not
+published; add networks you know with `vpsmcp caddyfile --allow-cidr <cidr>`
+(repeatable), or leave the lock off.
+
+## Clients
+
+A client is accepted when its OAuth callback matches the allowlist. Everything
+else in the flow is identical for all of them, so the client list is a list of
+callbacks:
+
+| `VPSMCP_CLIENTS` key | Client | Callbacks |
+|---|---|---|
+| `claude` | Claude | `https://claude.ai/api/mcp/auth_callback`, same on `claude.com` |
+| `local` | Claude Code, MCP Inspector | `http://localhost/callback`, `http://127.0.0.1/callback`, any port (RFC 8252 §7.3) |
+| `kimi` | Kimi (Moonshot AI) | `kimi.com`, `www.kimi.com`, `kimi.moonshot.cn`, `www.kimi.moonshot.cn`, `platform.moonshot.cn`, `platform.moonshot.ai` |
+| `glm` | GLM (Zhipu AI / Z.ai) | `chat.z.ai`, `z.ai`, `chatglm.cn`, `www.chatglm.cn`, `open.bigmodel.cn`, `bigmodel.cn` |
+
+Claude publishes a fixed callback path, so its entries are exact. The Kimi and GLM
+entries are host-scoped (`https://<host>/` matches any path on that host) because
+those vendors do not document theirs and may change it. A host-scoped entry means
+trusting that host not to run an open redirect; the consent page therefore names
+the callback host and the client it belongs to before you approve.
+
+```bash
+sudo vpsmcp clients [--json]          # profiles, on/off, callbacks
+sudo vpsmcp redirects [--json]        # effective allowlist + refused callbacks
+sudo vpsmcp redirect allow <uri>      # add one (https, or http on loopback)
+sudo vpsmcp redirect deny  <uri>      # remove one added this way
+sudo vpsmcp redirect clear-rejected   # forget the refusal list
+```
+
+Entries added with `redirect allow` live in `oauth.db`, are read on every
+request (no restart) and are listed as "added by hand". Refused callbacks are
+recorded - with the client name it registered under - so a new client is allowed
+by copying its URL rather than guessing it. That list is written by
+unauthenticated requests, so it holds at most 200 distinct URLs and forgets
+entries after 30 days.
+
+The three sources are merged: client profiles (`VPSMCP_CLIENTS`),
+`VPSMCP_ALLOWED_REDIRECTS`, and the runtime entries. To make the env variable the
+whole allowlist, set `VPSMCP_CLIENTS=` empty.
 
 ## Settings
 
@@ -152,7 +193,10 @@ password hash contains `$`.
 | `VPSMCP_ACCESS_TTL` / `_REFRESH_TTL` | `900` / `2592000` | seconds |
 | `VPSMCP_CODE_TTL` | `120` | authorization code lifetime, seconds |
 | `VPSMCP_LOGIN_SESSION_TTL` | `3600` | consent page session, seconds |
-| `VPSMCP_ALLOWED_REDIRECTS` | claude.ai / claude.com callbacks, `http://localhost/callback`, `http://127.0.0.1/callback` | redirect_uri prefixes |
+| `VPSMCP_CLIENTS` | `claude,local,kimi,glm` | client profiles whose callbacks are allowed; `vpsmcp clients` lists them |
+| `VPSMCP_ALLOWED_REDIRECTS` | empty | extra redirect_uri prefixes, added to the profiles |
+| `VPSMCP_REQUIRE_PKCE` | `1` | `0` also accepts `plain` and no challenge at all - for a client that does not implement PKCE; weakens the flow, keep it on |
+| `VPSMCP_LENIENT_TOKEN_BODY` | `0` | `1` also accepts a JSON body on `/token`, for a client that posts JSON instead of form-urlencoded |
 | `VPSMCP_ENABLE_DCR` | `1` | dynamic client registration |
 | `VPSMCP_ENABLE_CIMD` | `1` | client ID metadata documents |
 | `VPSMCP_ENABLE_GUARDRAILS` | `1` | command filter |

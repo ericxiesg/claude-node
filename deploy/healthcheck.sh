@@ -133,12 +133,19 @@ fi
 
 asm=$(curl -fsS --max-time 10 "$URL/.well-known/oauth-authorization-server" 2>/dev/null)
 if [[ -n "$asm" ]]; then
-  echo "$asm" | grep -q '"code_challenge_methods_supported":\["S256"\]' \
+  # ["S256"] normally, ["S256","plain"] with VPSMCP_REQUIRE_PKCE=0
+  echo "$asm" | grep -q '"code_challenge_methods_supported":\["S256"' \
     && ok "authorization server metadata" "PKCE S256 advertised" \
     || bad "authorization server metadata" "code_challenge_methods_supported missing"
 else
   bad "authorization server metadata" "not served (RFC 8414)"
 fi
+
+# clients that take the resource URL for the issuer look here instead
+asm2=$(curl -fsS --max-time 10 "$URL/.well-known/oauth-authorization-server$MCP_PATH" 2>/dev/null)
+[[ -n "$asm2" ]] && ok "authorization server metadata (path form)" "served" \
+                 || bad "authorization server metadata (path form)" \
+                        "not served; clients that derive it from the resource URL cannot log in"
 
 chal=$(curl -sS -o /dev/null -D- --max-time 10 -X POST "$RESOURCE" \
        -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \

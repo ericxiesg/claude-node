@@ -56,9 +56,19 @@ python3 -m vpsmcp serve &
 
 ```bash
 python3 tests/test_oauth_flow.py  $D/token.json   # 14 OAuth assertions
+python3 tests/test_client_compat.py               # 15 client-compatibility assertions
 python3 tests/test_tools_e2e.py   $D/token.json   # all tools
 python3 tests/test_scopes.py                      # scope isolation, token forgery
 python3 tests/test_gateway_node.py $TOKEN_FILE    # on a real gateway installed with --self-enroll (host alias gw)
+```
+
+`test_client_compat.py` reads the same environment as the server and asserts the
+opposite behaviour when the compatibility switches are on, so run it twice:
+
+```bash
+python3 tests/test_client_compat.py                                  # defaults
+VPSMCP_REQUIRE_PKCE=0 VPSMCP_LENIENT_TOKEN_BODY=1 <restart, then>    # relaxed
+python3 tests/test_client_compat.py
 ```
 
 The password `correct-horse-battery` is hardcoded for local testing only.
@@ -70,6 +80,12 @@ file obtained against it.
 ## Covered
 
 - DCR registration, redirect_uri allowlist, login lockout
+- Client compatibility: the Kimi and GLM callback profiles, discovery on all three
+  RFC 8414 path forms, `resource` given as the origin, a refused callback being
+  recorded and then allowed at runtime with no restart, client_secret_basic and
+  _post (including a confidential client's refresh token refused when the
+  credentials are dropped, without burning the token), and both compatibility
+  switches in each position
 - PKCE, single-use codes, replay revocation, refresh rotation and reuse
   detection, audience binding
 - 401 with `WWW-Authenticate`, tampered signature, forged audience and algorithm

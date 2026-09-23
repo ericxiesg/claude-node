@@ -5,7 +5,7 @@
 ## 1. Topology
 
 ```
-Claude (web / desktop / mobile / Claude Code)
+Claude / Kimi / GLM  (web, desktop, mobile, CLI)
    │  HTTPS, Streamable HTTP + Bearer JWT
    ▼
 Gateway VPS - mcp.example.com
@@ -34,25 +34,39 @@ rotating refresh tokens with replay detection, and an approval step on a consent
 page you control.
 
 ```
-Claude                              Gateway
+Client                              Gateway
   POST /mcp (no token)        →
         ← 401 WWW-Authenticate: Bearer resource_metadata="..."
   GET  /.well-known/oauth-protected-resource/mcp     (RFC 9728)
-  GET  /.well-known/oauth-authorization-server       (RFC 8414)
+  GET  /.well-known/oauth-authorization-server       (RFC 8414, 3 path forms)
   POST /oauth/register        →     DCR (RFC 7591) or CIMD client_id URL
   GET  /oauth/authorize       →     login (scrypt) + consent, PKCE S256
-        ← 302 https://claude.ai/api/mcp/auth_callback?code=...
+        ← 302 <the client's callback>?code=...
   POST /oauth/token           →     access token (aud = resource URL) + refresh
   POST /mcp  Bearer ...       →     verify iss/aud/exp/signature → scopes
 ```
 
+The same path for every client. What differs between Claude, Kimi and GLM is the
+callback URL, so that is the only per-client thing the server knows
+(`auth/clients.py`, `VPSMCP_CLIENTS`, and the runtime allowlist behind
+`vpsmcp redirect allow`).
+
 Details that are easy to get wrong and are already handled:
 
-- `resource` in the metadata, `aud` in the JWT and the URL typed into Claude must
-  match byte for byte. `VPSMCP_PUBLIC_URL` is a bare origin; resource URL = origin + `/mcp`.
+- `resource` in the metadata, `aud` in the JWT and the URL typed into the client
+  must match byte for byte. `VPSMCP_PUBLIC_URL` is a bare origin; resource URL =
+  origin + `/mcp`. A client that sends the origin in `resource` instead of the
+  endpoint is accepted, and still gets `aud` = resource URL.
 - The unauthenticated `/mcp` response must be a real 401; a challenge on a 200 is ignored.
-- PKCE S256 only, and the metadata must advertise `code_challenge_methods_supported`.
-- `/token` accepts form-urlencoded only, `/register` JSON only.
+- PKCE S256 only, and the metadata must advertise `code_challenge_methods_supported`
+  (`VPSMCP_REQUIRE_PKCE=0` also takes `plain`, for a client that has no S256).
+- `/token` accepts form-urlencoded only, `/register` JSON only
+  (`VPSMCP_LENIENT_TOKEN_BODY=1` also takes JSON on `/token`).
+- Discovery is served on the origin and on both RFC 8414 path forms: clients
+  disagree about whether the issuer is the origin or the resource URL.
+- A client registered with `client_secret_post`/`_basic` gets a secret and must
+  present it; a public client must not be asked for one. Either way the code and
+  the refresh token stay bound to the `client_id` they were issued to.
 - Failed refresh must return `invalid_grant`.
 - Loopback redirects ignore the port (RFC 8252 §7.3) for Claude Code.
 - Discovery times out at 10s, refresh at 30s, so no slow I/O on those routes.
@@ -140,7 +154,7 @@ in throwaway labs only.
 | Authorization code intercepted | PKCE S256, 120s single-use code, replay revokes the whole token family | — |
 | Refresh token leaked | rotation; reuse invalidates the family | attacker may use it once first, which logs you out - that is the alarm |
 | Access token leaked | 15-minute expiry, `aud` bound to the resource URL | usable inside that window |
-| Phishing authorization | consent page shows the callback domain; redirect URIs allowlisted | depends on you reading the page |
+| Phishing authorization | consent page shows the callback domain and which client it belongs to; redirect URIs allowlisted, and a refused one is only allowed by an explicit command | depends on you reading the page; a host-scoped entry trusts that host not to run an open redirect |
 | Prompt injection into destructive commands | guardrails, confirm step, `fleet.write` can be withheld, `VPSMCP_READ_ONLY=1` | guardrails are bypassable; SSH account rights are the boundary |
 | Gateway compromised | systemd sandbox, key 640 root:vpsmcp, dirs 750 | **the gateway holds the key to every node - full fleet compromise** |
 | Accountability | one fsynced JSONL line per call: who, when, which node, what command, exit code | audit file is local and tamperable by whoever owns the gateway |

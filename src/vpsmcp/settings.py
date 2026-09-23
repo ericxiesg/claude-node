@@ -5,6 +5,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .auth.clients import DEFAULT_CLIENTS, redirects_for
+
 SCOPES = ("fleet.read", "fleet.exec", "fleet.write", "fleet.admin")
 
 
@@ -61,7 +63,10 @@ class Settings:
     refresh_ttl: int
     code_ttl: int
     login_session_ttl: int
-    allowed_redirect_prefixes: tuple[str, ...]
+    clients: tuple[str, ...]               # client profiles whose callbacks are allowed
+    extra_redirect_prefixes: tuple[str, ...]
+    require_pkce: bool
+    lenient_token_body: bool
     enable_dcr: bool
     enable_cimd: bool
 
@@ -82,8 +87,32 @@ class Settings:
 
     @property
     def resource_url(self) -> str:
-        """RFC 8707 canonical URI. Must match the URL entered in Claude byte for byte."""
+        """RFC 8707 canonical URI. This is the URL you enter in the client."""
         return f"{self.public_url.rstrip('/')}{self.mcp_path}"
+
+    @property
+    def resource_aliases(self) -> tuple[str, ...]:
+        """Values accepted in `resource`. The canonical form is resource_url; the
+        origin is accepted too because clients differ on whether the audience is
+        the server or the endpoint, and rejecting the origin ends the flow with a
+        bare invalid_target the user cannot act on. Anything else is refused, so
+        a token still cannot be minted for another audience."""
+        base = self.public_url.rstrip("/")
+        res = self.resource_url
+        return (res, res.rstrip("/"), base, base + "/")
+
+    def resource_ok(self, value: str | None) -> bool:
+        if not value:
+            return True
+        return value.rstrip("/") in {a.rstrip("/") for a in self.resource_aliases}
+
+    @property
+    def allowed_redirect_prefixes(self) -> tuple[str, ...]:
+        """Profiles first, then VPSMCP_ALLOWED_REDIRECTS. Runtime entries added with
+        `vpsmcp redirect allow` live in oauth.db and are merged by the auth server."""
+        out = list(redirects_for(self.clients))
+        out += [p for p in self.extra_redirect_prefixes if p not in out]
+        return tuple(out)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -117,12 +146,10 @@ class Settings:
             refresh_ttl=_i("VPSMCP_REFRESH_TTL", 30 * 86400),
             code_ttl=_i("VPSMCP_CODE_TTL", 120),
             login_session_ttl=_i("VPSMCP_LOGIN_SESSION_TTL", 3600),
-            allowed_redirect_prefixes=_csv(
-                "VPSMCP_ALLOWED_REDIRECTS",
-                "https://claude.ai/api/mcp/auth_callback,"
-                "https://claude.com/api/mcp/auth_callback,"
-                "http://localhost/callback,http://127.0.0.1/callback",
-            ),
+            clients=_csv("VPSMCP_CLIENTS", ",".join(DEFAULT_CLIENTS)),
+            extra_redirect_prefixes=_csv("VPSMCP_ALLOWED_REDIRECTS", ""),
+            require_pkce=_b("VPSMCP_REQUIRE_PKCE", True),
+            lenient_token_body=_b("VPSMCP_LENIENT_TOKEN_BODY", False),
             enable_dcr=_b("VPSMCP_ENABLE_DCR", True),
             enable_cimd=_b("VPSMCP_ENABLE_CIMD", True),
             enroll_mode=_s("VPSMCP_ENROLL_MODE", "open").lower(),

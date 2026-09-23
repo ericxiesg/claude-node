@@ -1,13 +1,19 @@
 """Built-in OAuth 2.1 authorization server.
 
-Implements the narrow subset Claude needs: authorization_code + PKCE(S256) +
-refresh_token + DCR/CIMD.
+authorization_code + PKCE(S256) + refresh_token + DCR/CIMD: the subset every MCP
+client needs. Claude, Kimi and GLM all take this path; they differ only in the
+callback they return to (see clients.py) and in how strictly they follow the
+spec, which is what the rest of this module accounts for.
 
 Client constraints that must be honoured:
-  - redirect_uri https://claude.ai/api/mcp/auth_callback; Claude Code uses an
-    RFC 8252 loopback address with a random port, so compare ignoring the port
+  - redirect_uri comes from an enabled client profile, VPSMCP_ALLOWED_REDIRECTS or
+    `vpsmcp redirect allow`; Claude Code uses an RFC 8252 loopback address with a
+    random port, so compare ignoring the port
   - PKCE S256 on every request; metadata must advertise code_challenge_methods_supported
   - /token takes application/x-www-form-urlencoded, /register takes application/json
+  - `resource` may be the endpoint or the origin: clients disagree, and either way
+    the token audience stays this server's resource URL
+  - a confidential client gets a client_secret at registration and must present it
   - discovery/registration/token endpoints must answer within 10s (refresh 30s)
   - a failed refresh must return the RFC 6749 code invalid_grant
 """
@@ -20,9 +26,10 @@ import html
 import ipaddress
 import json
 import secrets
+import shlex
 import socket
 import time
-from urllib.parse import urlencode, urlparse, urlunparse
+from urllib.parse import unquote, urlencode, urlparse, urlunparse
 
 import httpx
 import jwt
@@ -31,6 +38,7 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Re
 from starlette.routing import Route
 
 from ..settings import SCOPES, Settings
+from .clients import enabled_profiles, guess_client, profile_for_redirect
 from .keys import KeyStore, verify_password
 from .store import Store, sha
 
@@ -122,6 +130,40 @@ class AuthorizationServer:
             return xff.split(",")[0].strip()
         return request.client.host if request.client else "?"
 
+    # ---------------- redirect_uri allowlist ----------------
+    def redirect_prefixes(self) -> tuple[str, ...]:
+        """Configured prefixes plus the ones added at runtime. Read per request:
+        `vpsmcp redirect allow` must not need a restart."""
+        out = list(self.s.allowed_redirect_prefixes)
+        out += [p for p in self.store.redirect_prefixes() if p not in out]
+        return tuple(out)
+
+    def redirect_ok(self, uri: str) -> bool:
+        return bool(uri) and redirect_allowed(uri, self.redirect_prefixes())
+
+    def _reject_redirect(self, uri: str, client_name: str, reason: str,
+                         request: Request) -> None:
+        self.store.note_rejected_redirect(uri, client_name)
+        self.audit.write(event="oauth.redirect_rejected", redirect_uri=uri[:400],
+                         client_name=client_name, reason=reason,
+                         ip=self._client_ip(request))
+
+    def _redirect_help(self, uri: str) -> str:
+        """What to do about a callback this server does not know yet. The command is
+        the point: no vendor callback has to be guessed in advance."""
+        known = ", ".join(p.name for p in enabled_profiles(self.s.clients)) or "none"
+        # The URL is whatever the client sent. It is escaped for the page, and
+        # shell-quoted in the command, which is meant to be copied into a root shell.
+        shown = html.escape(uri or "(empty)")
+        quoted = html.escape(shlex.quote(uri)) if uri else "&lt;uri&gt;"
+        return (f"<p><code>{shown}</code> is not in the "
+                f"allowlist.</p><p>Enabled clients: {html.escape(known)}. If this "
+                f"callback is really yours, allow it on the gateway:</p>"
+                f"<pre>sudo vpsmcp redirect allow {quoted}</pre>"
+                f"<p class=\"hint\">It is also listed by <code>sudo vpsmcp redirects</code>, "
+                f"together with every other callback that was refused. Allow only a URL "
+                f"you recognise: it is where the authorization code is sent.</p>")
+
     # ---------------- client resolution (DCR / CIMD / pre-registered) ----------------
     async def _resolve_client(self, client_id: str) -> dict | None:
         rec = self.store.get_client(client_id)
@@ -156,9 +198,20 @@ class AuthorizationServer:
 
     # ---------------- routes ----------------
     def routes(self) -> list[Route]:
+        mcp_path = self.s.mcp_path
         return [
             Route("/.well-known/oauth-authorization-server", self.metadata, methods=["GET"]),
             Route("/.well-known/openid-configuration", self.metadata, methods=["GET"]),
+            # RFC 8414 path-insertion forms. Clients that treat the resource URL
+            # (not the origin) as the issuer look here, and get a 404 otherwise.
+            Route(f"/.well-known/oauth-authorization-server{mcp_path}", self.metadata,
+                  methods=["GET"]),
+            Route(f"/.well-known/openid-configuration{mcp_path}", self.metadata,
+                  methods=["GET"]),
+            Route(f"{mcp_path}/.well-known/oauth-authorization-server", self.metadata,
+                  methods=["GET"]),
+            Route(f"{mcp_path}/.well-known/openid-configuration", self.metadata,
+                  methods=["GET"]),
             Route("/oauth/jwks.json", self.jwks, methods=["GET"]),
             Route("/oauth/register", self.register, methods=["POST"]),
             Route("/oauth/authorize", self.authorize, methods=["GET", "POST"]),
@@ -179,7 +232,8 @@ class AuthorizationServer:
             "response_types_supported": ["code"],
             "response_modes_supported": ["query"],
             "grant_types_supported": ["authorization_code", "refresh_token"],
-            "code_challenge_methods_supported": ["S256"],
+            "code_challenge_methods_supported": (
+                ["S256"] if self.s.require_pkce else ["S256", "plain"]),
             "token_endpoint_auth_methods_supported": ["none", "client_secret_post",
                                                       "client_secret_basic"],
             "subject_types_supported": ["public"],
@@ -203,30 +257,44 @@ class AuthorizationServer:
             body = await request.json()
         except Exception:  # noqa: BLE001
             return _err("invalid_client_metadata", "body must be JSON (RFC 7591 3.1)")
+        name = str(body.get("client_name") or "unnamed")[:120]
         uris = body.get("redirect_uris") or []
         if not isinstance(uris, list) or not uris:
             return _err("invalid_redirect_uri", "missing redirect_uris")
-        bad = [u for u in uris if not redirect_allowed(u, self.s.allowed_redirect_prefixes)]
+        bad = [u for u in uris if not self.redirect_ok(str(u))]
         if bad:
+            for u in bad:
+                self._reject_redirect(str(u), name, "register", request)
             return _err("invalid_redirect_uri",
-                        f"redirect_uri not allowed: {bad} (see VPSMCP_ALLOWED_REDIRECTS)")
+                        f"redirect_uri not allowed: {bad}. Allow it on the gateway with "
+                        f"`vpsmcp redirect allow <uri>`, or enable the client profile it "
+                        f"belongs to (VPSMCP_CLIENTS)")
+        # A client that asks to authenticate gets a secret. Claude does not; several
+        # other clients refuse to finish registration without one.
+        method = str(body.get("token_endpoint_auth_method") or "none")
+        if method not in ("client_secret_post", "client_secret_basic"):
+            method = "none"
         client_id = f"dcr_{secrets.token_urlsafe(24)}"
         meta = {
             "client_id": client_id,
-            "client_name": str(body.get("client_name") or "unnamed")[:120],
+            "client_name": name,
             "redirect_uris": uris,
             "grant_types": body.get("grant_types") or ["authorization_code", "refresh_token"],
             "response_types": body.get("response_types") or ["code"],
-            "token_endpoint_auth_method": "none",
+            "token_endpoint_auth_method": method,
             "scope": body.get("scope") or " ".join(SCOPES),
             "client_uri": body.get("client_uri"),
         }
-        self.store.put_client(client_id, meta)
+        secret = secrets.token_urlsafe(32) if method != "none" else None
+        self.store.put_client(client_id, meta, sha(secret) if secret else None)
         self.audit.write(event="oauth.register", client_id=client_id,
-                         client_name=meta["client_name"], redirect_uris=uris,
+                         client_name=name, redirect_uris=uris, auth_method=method,
                          ip=self._client_ip(request))
-        return JSONResponse({**meta, "client_id_issued_at": int(time.time())},
-                            status_code=201, headers={"Cache-Control": "no-store"})
+        out = {**meta, "client_id_issued_at": int(time.time())}
+        if secret:
+            out["client_secret"] = secret
+            out["client_secret_expires_at"] = 0  # never
+        return JSONResponse(out, status_code=201, headers={"Cache-Control": "no-store"})
 
     # ---------------- authorize ----------------
     async def authorize(self, request: Request) -> Response:
@@ -245,17 +313,29 @@ class AuthorizationServer:
 
         client = await self._resolve_client(client_id)
         if not client:
+            # Record the callback too: a client whose registration was refused often
+            # comes back here with a client_id it never got, and the refused URL is
+            # the thing the admin has to act on.
+            if redirect_uri and not self.redirect_ok(redirect_uri):
+                self._reject_redirect(redirect_uri, guess_client(redirect_uri),
+                                      "unknown_client", request)
             return HTMLResponse(_page("Unknown client",
                 "<p>client_id could not be resolved. For DCR, POST /oauth/register first. "
                 "For CIMD, the metadata document must be publicly reachable and its "
-                "client_id must equal its URL.</p>"), 400)
+                "client_id must equal its URL.</p>"
+                "<p class=\"hint\">If registration was refused because of the callback "
+                "URL, <code>sudo vpsmcp redirects</code> on the gateway prints it and the "
+                "command that allows it.</p>"), 400)
 
+        client_name = str(client["metadata"].get("client_name") or guess_client(redirect_uri))
         registered = client["metadata"].get("redirect_uris") or []
         if not redirect_uri or not _match_redirect(redirect_uri, registered):
             return HTMLResponse(_page("redirect_uri mismatch",
                 f"<p><code>{html.escape(redirect_uri)}</code> is not registered for this client.</p>"), 400)
-        if not redirect_allowed(redirect_uri, self.s.allowed_redirect_prefixes):
-            return HTMLResponse(_page("redirect_uri rejected", "<p>Not in the server allowlist.</p>"), 400)
+        if not self.redirect_ok(redirect_uri):
+            self._reject_redirect(redirect_uri, client_name, "authorize", request)
+            return HTMLResponse(_page("Callback not allowed",
+                                      self._redirect_help(redirect_uri)), 400)
 
         def bounce(**kw) -> RedirectResponse:
             q = {**kw, "iss": self.s.public_url}
@@ -267,10 +347,14 @@ class AuthorizationServer:
         if params.get("response_type") != "code":
             return bounce(error="unsupported_response_type",
                           error_description="only response_type=code is supported")
-        if method != "S256" or not challenge:
+        if self.s.require_pkce:
+            if method != "S256" or not challenge:
+                return bounce(error="invalid_request",
+                              error_description="PKCE code_challenge with method=S256 is required")
+        elif challenge and method not in ("S256", "plain"):
             return bounce(error="invalid_request",
-                          error_description="PKCE code_challenge with method=S256 is required")
-        if resource and resource.rstrip("/") != self.s.resource_url.rstrip("/"):
+                          error_description="code_challenge_method must be S256 or plain")
+        if not self.s.resource_ok(resource):
             return bounce(error="invalid_target",
                           error_description=f"resource must be {self.s.resource_url}")
 
@@ -287,7 +371,8 @@ class AuthorizationServer:
             code = secrets.token_urlsafe(40)
             self.store.put_code(
                 code, client_id=client_id, redirect_uri=redirect_uri, scope=granted,
-                challenge=challenge, resource=self.s.resource_url, subject=subject,
+                challenge=challenge, challenge_method=(method if challenge else "none"),
+                resource=self.s.resource_url, subject=subject,
                 expires_at=int(time.time()) + self.s.code_ttl,
             )
             self.audit.write(event="oauth.authorize", client_id=client_id, subject=subject,
@@ -328,17 +413,48 @@ class AuthorizationServer:
     # ---------------- token ----------------
     async def token(self, request: Request) -> JSONResponse:
         ctype = request.headers.get("content-type", "")
-        if "application/x-www-form-urlencoded" not in ctype:
+        if "application/x-www-form-urlencoded" in ctype:
+            form = await request.form()
+        elif self.s.lenient_token_body and "application/json" in ctype:
+            # RFC 6749 says form-encoded, and that stays the default. Some clients
+            # post JSON anyway; VPSMCP_LENIENT_TOKEN_BODY=1 accepts it.
+            try:
+                body = await request.json()
+            except Exception:  # noqa: BLE001
+                return _err("invalid_request", "body is not valid JSON")
+            if not isinstance(body, dict):
+                return _err("invalid_request", "JSON body must be an object")
+            form = {k: "" if v is None else str(v) for k, v in body.items()}
+        else:
+            hint = "" if self.s.lenient_token_body else \
+                " (VPSMCP_LENIENT_TOKEN_BODY=1 also accepts application/json)"
             return _err("invalid_request",
-                        "Content-Type must be application/x-www-form-urlencoded")
-        form = await request.form()
+                        "Content-Type must be application/x-www-form-urlencoded" + hint)
         grant = str(form.get("grant_type", ""))
-        client_id = str(form.get("client_id", "")) or _basic_client(request)
+        client_id, client_secret = _client_credentials(request, form)
+        denied = self._check_client_auth(client_id, client_secret)
+        if denied is not None:
+            return denied
         if grant == "authorization_code":
             return await self._grant_code(request, form, client_id)
         if grant == "refresh_token":
             return await self._grant_refresh(request, form, client_id)
         return _err("unsupported_grant_type", f"unsupported grant_type={grant}")
+
+    def _check_client_auth(self, client_id: str, secret: str) -> JSONResponse | None:
+        """A client registered with an auth method must present its secret. Public
+        clients (Claude, CIMD, anything registered with `none`) must not be asked
+        for one, so an unknown or secretless client_id falls through to the grant
+        checks, which bind the code or refresh token to it."""
+        if not client_id:
+            return None
+        rec = self.store.get_client(client_id)
+        if not rec or not rec.get("secret_hash"):
+            return None
+        if not secret or not hmac.compare_digest(sha(secret), rec["secret_hash"]):
+            self.audit.write(event="oauth.client_auth_failed", client_id=client_id)
+            return _err("invalid_client", "client authentication failed", 401)
+        return None
 
     async def _grant_code(self, request: Request, form, client_id: str) -> JSONResponse:
         code = str(form.get("code", ""))
@@ -357,17 +473,36 @@ class AuthorizationServer:
             return _err("invalid_grant", "client_id does not match the code")
         if redirect_uri and redirect_uri != rec["redirect_uri"]:
             return _err("invalid_grant", "redirect_uri does not match")
-        expect = _b64u(hashlib.sha256(verifier.encode()).digest())
-        if not verifier or not hmac.compare_digest(expect, rec["challenge"]):
+        method = str(rec.get("challenge_method") or ("S256" if rec["challenge"] else "none"))
+        if method == "S256":
+            expect = _b64u(hashlib.sha256(verifier.encode()).digest())
+            verified = bool(verifier) and hmac.compare_digest(expect, rec["challenge"])
+        elif method == "plain":
+            verified = bool(verifier) and hmac.compare_digest(verifier, rec["challenge"])
+        else:
+            # No challenge was presented, which only happens with VPSMCP_REQUIRE_PKCE=0.
+            # If PKCE has been turned back on since, such a code is no longer good.
+            verified = not self.s.require_pkce
+        if not verified:
             return _err("invalid_grant", "PKCE verification failed")
         resource = str(form.get("resource") or rec["resource"] or self.s.resource_url)
-        if resource.rstrip("/") != self.s.resource_url.rstrip("/"):
+        if not self.s.resource_ok(resource):
             return _err("invalid_target", f"resource must be {self.s.resource_url}")
         return self._issue(client_id, rec["subject"], rec["scope"], family=sha(code),
                            request=request)
 
     async def _grant_refresh(self, request: Request, form, client_id: str) -> JSONResponse:
         rt = str(form.get("refresh_token", ""))
+        # client_id is optional here for public clients, but a client that holds a
+        # secret has to name itself: that is what makes token() check the secret.
+        # Before take_refresh, so a refused attempt does not rotate the token.
+        owner = self.store.refresh_owner(rt)
+        if owner and client_id != owner:
+            rec_client = self.store.get_client(owner)
+            if rec_client and rec_client.get("secret_hash"):
+                return _err("invalid_client",
+                            "this client must authenticate: send client_id and "
+                            "client_secret", 401)
         rec = self.store.take_refresh(rt)
         if rec is None:
             return _err("invalid_grant", "invalid refresh_token")
@@ -447,9 +582,20 @@ only after a successful sign-in.</p>
     def _consent_page(self, params: dict, client: dict, scope: str, subject: str) -> str:
         meta = client["metadata"]
         name = html.escape(str(meta.get("client_name", client["client_id"])))
-        redirect_host = html.escape(
-            urlparse(params.get("redirect_uri", "")).netloc or "(loopback)")
+        redirect_uri = params.get("redirect_uri", "")
+        redirect_host = html.escape(urlparse(redirect_uri).netloc or "(loopback)")
         origin = " · via CIMD" if meta.get("_cimd") else " · via DCR"
+        # The callback host is the one thing worth checking by eye: it is where the
+        # authorization code goes. Say which client it belongs to, or say nobody.
+        profile = profile_for_redirect(redirect_uri, self.s.clients)
+        if profile:
+            callback = (f'<p class="warn">Callback host: <code>{redirect_host}</code> '
+                        f"&mdash; {html.escape(profile.name)}. Approve only if that is "
+                        f"the client you just used.</p>")
+        else:
+            callback = (f'<p class="warn">Callback host: <code>{redirect_host}</code> '
+                        f"belongs to no configured client; it was allowed by hand on "
+                        f"this gateway. If you did not add it, <b>do not approve</b>.</p>")
         hidden = "".join(
             f'<input type="hidden" name="{html.escape(k)}" value="{html.escape(v)}">'
             for k, v in params.items() if k != "_action"
@@ -464,8 +610,7 @@ only after a successful sign-in.</p>
             )
         return _page("Authorize", f"""
 <p><b>{name}</b>{origin} is requesting access to your fleet.</p>
-<p class="warn">Callback host: <code>{redirect_host}</code>. If that is not
-<code>claude.ai</code> or your own loopback address, <b>do not approve</b>.</p>
+{callback}
 <form method="post" action="/oauth/authorize">
   {hidden}
   <div class="scopes">{''.join(rows)}</div>
@@ -498,15 +643,26 @@ def _match_redirect(uri: str, registered: list[str]) -> bool:
     return False
 
 
-def _basic_client(request: Request) -> str:
+def _basic_auth(request: Request) -> tuple[str, str]:
+    """RFC 6749 2.3.1: both halves are form-urlencoded before base64."""
     auth = request.headers.get("authorization", "")
-    if auth.lower().startswith("basic "):
-        try:
-            raw = base64.b64decode(auth[6:]).decode()
-            return raw.split(":", 1)[0]
-        except Exception:  # noqa: BLE001
-            return ""
-    return ""
+    if not auth.lower().startswith("basic "):
+        return "", ""
+    try:
+        raw = base64.b64decode(auth[6:]).decode()
+    except Exception:  # noqa: BLE001
+        return "", ""
+    cid, _, sec = raw.partition(":")
+    return unquote(cid), unquote(sec)
+
+
+def _client_credentials(request: Request, form) -> tuple[str, str]:
+    cid = str(form.get("client_id", "") or "")
+    sec = str(form.get("client_secret", "") or "")
+    if not (cid and sec):
+        bcid, bsec = _basic_auth(request)
+        cid, sec = cid or bcid, sec or bsec
+    return cid, sec
 
 
 def _page(title: str, body: str) -> str:
