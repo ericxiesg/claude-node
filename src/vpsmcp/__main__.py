@@ -87,8 +87,13 @@ def cmd_serve() -> int:
         "listening on %s:%s   resource URL=%s",
         s.bind_host, s.bind_port, s.resource_url,
     )
+    # proxy_headers=False on purpose: uvicorn would rewrite request.client from the
+    # leftmost X-Forwarded-For (which the client can prefill), poisoning the very
+    # value we fall back to. We keep request.client as the true TCP peer and derive
+    # the real client ourselves (netutil.client_ip, VPSMCP_TRUSTED_PROXY_HOPS), so a
+    # caller cannot forge its source address.
     uvicorn.run(app, host=s.bind_host, port=s.bind_port,
-                proxy_headers=True, forwarded_allow_ips="*", log_level="info")
+                proxy_headers=False, log_level="info")
     return 0
 
 

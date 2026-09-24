@@ -152,6 +152,10 @@ Common causes:
 - The proxy buffers the stream. nginx needs `proxy_buffering off` and long
   timeouts; Caddy needs `flush_interval -1`. `gen-caddyfile.sh` gets this right.
 - `/oauth/authorize` is unreachable from your browser because it was IP-locked.
+- The enrollment CIDR allowlist rejects everyone, or the login lockout never
+  trips: `VPSMCP_TRUSTED_PROXY_HOPS` does not match your proxy chain. It is `1`
+  for a single Caddy/nginx; set it to the number of proxies that append to
+  `X-Forwarded-For`, or `0` if the app has no proxy in front.
 
 ---
 

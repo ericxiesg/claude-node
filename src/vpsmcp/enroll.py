@@ -26,6 +26,8 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 
+from .netutil import client_ip
+
 log = logging.getLogger("vpsmcp.enroll")
 
 SCHEMA = """
@@ -393,12 +395,8 @@ class EnrollService:
         self.audit = audit
 
     # ---------- helpers ----------
-    @staticmethod
-    def _ip(request: Request) -> str:
-        xff = request.headers.get("x-forwarded-for")
-        if xff:
-            return xff.split(",")[0].strip()
-        return request.client.host if request.client else ""
+    def _ip(self, request: Request) -> str:
+        return client_ip(request, self.s.trusted_proxy_hops)
 
     def _pubkey(self) -> str:
         p = Path(str(self.s.ssh_key_path) + ".pub")
