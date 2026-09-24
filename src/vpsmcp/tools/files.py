@@ -19,6 +19,22 @@ def _fmt_mode(m: int) -> str:
     return statmod.filemode(m)
 
 
+async def read_capped(sftp, path: str, cap: int) -> bytes:
+    """Read at most `cap` bytes; raise if the source has more.
+
+    The size is enforced on the bytes actually returned, never on the SFTP
+    server's self-reported stat: a compromised source node can understate its
+    size to slip past a stat check and then stream unbounded data into the
+    gateway's memory. Reading cap+1 and rejecting len > cap closes that.
+    """
+    async with sftp.open(path, "rb") as fh:
+        data = await fh.read(cap + 1)
+    if len(data) > cap:
+        raise ToolError(f"source exceeds the {cap}-byte relay limit; "
+                        f"use exec with rsync between the hosts")
+    return data
+
+
 def register(mcp: FastMCP, rt: Runtime) -> None:
 
     @mcp.tool(annotations={"readOnlyHint": True})
@@ -186,14 +202,9 @@ def register(mcp: FastMCP, rt: Runtime) -> None:
         sh = rt.resolve(src_host, "fleet.read")
         dh = rt.resolve(dst_host, "fleet.write")
         sc, dc = await rt.conn(sh), await rt.conn(dh)
+        cap = rt.s.max_file_bytes
         async with sc.start_sftp_client() as s_sftp:
-            st = await s_sftp.stat(src_path)
-            if (st.size or 0) > rt.s.max_file_bytes:
-                raise ToolError(
-                    f"{st.size} bytes exceeds the relay limit {rt.s.max_file_bytes}; "
-                    f"use exec with rsync instead")
-            async with s_sftp.open(src_path, "rb") as fh:
-                data = await fh.read()
+            data = await read_capped(s_sftp, src_path, cap)
         async with dc.start_sftp_client() as d_sftp:
             try:
                 await d_sftp.makedirs(posixpath.dirname(dst_path) or ".", exist_ok=True)
