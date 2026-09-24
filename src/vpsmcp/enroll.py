@@ -152,6 +152,8 @@ ENROLL_SH = r'''#!/usr/bin/env bash
 #                  user that can sudo unless you accept the gateway acting as root.
 #   --port N       SSH port to register; needed with --rootless on a non-default
 #                  port, since detecting it from sshd usually needs root
+#   --proxy URL    route this account's egress through the gateway proxy, e.g.
+#                  http://node:PASS@mcp.example.com:8443 ; toggle with vpsmcp-proxy
 #   -k KEY         enrollment key, if the server requires one
 #   -v             verbose, for troubleshooting
 #   --uninstall    detach this machine
@@ -167,6 +169,7 @@ MODE=install
 ROOTLESS=0
 SELF=0
 PORT_OVERRIDE=""
+PROXY_URL=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -176,6 +179,7 @@ while [[ $# -gt 0 ]]; do
     --rootless) ROOTLESS=1; shift ;;
     --self) SELF=1; shift ;;
     --port) PORT_OVERRIDE="${2:-}"; shift 2 ;;
+    --proxy) PROXY_URL="${2:-}"; shift 2 ;;
     -k|--key) KEY="${2:-}"; shift 2 ;;
     -v|--verbose) V=1; shift ;;
     --uninstall) MODE=uninstall; shift ;;
@@ -299,6 +303,47 @@ else
     || echo "$GW_PUBKEY" >> "$HOME_DIR/.ssh/authorized_keys"
   chmod 600 "$HOME_DIR/.ssh/authorized_keys"
   mkdir -p "$HOME_DIR/.vpsmcp/jobs"; chmod 700 "$HOME_DIR/.vpsmcp" "$HOME_DIR/.vpsmcp/jobs"
+fi
+
+# optional: route this account's egress through the gateway proxy (--proxy URL).
+# Per-account only: writes ~/.vpsmcp/proxy.sh and sources it from the account's
+# shell rc; a `vpsmcp-proxy on|off|status` toggle flips between the gateway proxy
+# and the system default. Activated on deploy; the node can switch at any time.
+if [[ -n "$PROXY_URL" ]]; then
+  log "configuring egress proxy for $NODE_USER"
+  vdir="$HOME_DIR/.vpsmcp"; mkdir -p "$vdir"
+  cat > "$vdir/proxy.sh" <<PROXYEOF
+# vpsmcp egress proxy (per-account). Managed by enrollment; edit the URL here.
+VPSMCP_GATEWAY_PROXY='$PROXY_URL'
+__vpsmcp_pstate="\$HOME/.vpsmcp/proxy.state"
+vpsmcp_proxy_apply() {
+  if [ "\$(cat "\$__vpsmcp_pstate" 2>/dev/null)" = gateway ]; then
+    export http_proxy="\$VPSMCP_GATEWAY_PROXY" https_proxy="\$VPSMCP_GATEWAY_PROXY"
+    export HTTP_PROXY="\$VPSMCP_GATEWAY_PROXY" HTTPS_PROXY="\$VPSMCP_GATEWAY_PROXY"
+  fi
+}
+vpsmcp-proxy() {
+  case "\${1:-status}" in
+    on|gateway) echo gateway > "\$__vpsmcp_pstate"; vpsmcp_proxy_apply
+                echo "egress: gateway (\$VPSMCP_GATEWAY_PROXY)" ;;
+    off|system) echo system > "\$__vpsmcp_pstate"
+                unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+                echo "egress: system (proxy env cleared for new shells)" ;;
+    status)     echo "egress: \$(cat "\$__vpsmcp_pstate" 2>/dev/null || echo system)" ;;
+    *) echo "usage: vpsmcp-proxy on|off|status" >&2; return 2 ;;
+  esac
+}
+vpsmcp_proxy_apply
+PROXYEOF
+  echo gateway > "$vdir/proxy.state"   # activated at deploy time
+  for rc in "$HOME_DIR/.bashrc" "$HOME_DIR/.profile"; do
+    touch "$rc"
+    grep -q 'vpsmcp/proxy.sh' "$rc" 2>/dev/null \
+      || printf '\n[ -f "$HOME/.vpsmcp/proxy.sh" ] && . "$HOME/.vpsmcp/proxy.sh"\n' >> "$rc"
+  done
+  chmod 700 "$vdir"; chmod 600 "$vdir/proxy.sh" "$vdir/proxy.state"
+  [[ $ROOTLESS -eq 0 ]] && chown -R "$NODE_USER:$NODE_USER" "$vdir" \
+      "$HOME_DIR/.bashrc" "$HOME_DIR/.profile" 2>/dev/null || true
 fi
 
 # register

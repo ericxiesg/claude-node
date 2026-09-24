@@ -16,6 +16,8 @@
     vpsmcp redirect allow <uri>     allow one more callback, no restart
     vpsmcp redirect deny  <uri>
     vpsmcp set-password             set the admin password and restart (sudo)
+    vpsmcp proxy                    run the egress forward proxy (used by systemd)
+    vpsmcp proxy-password           set the egress-proxy password (sudo)
     vpsmcp hash-password            just print a password hash (does not apply it)
 """
 from __future__ import annotations
@@ -150,6 +152,63 @@ def cmd_set_password() -> int:
               else "wrote the hash, but restart failed; run: sudo systemctl restart vpsmcp")
         return 0 if r.returncode == 0 else 1
     print("wrote the hash; now run: sudo systemctl restart vpsmcp")
+    return 0
+
+
+def cmd_proxy() -> int:
+    """Run the authenticated egress forward proxy (nodes point http_proxy at it)."""
+    import asyncio
+
+    from .audit import Audit
+    from .proxy import serve
+
+    s = Settings.from_env()
+    if not s.proxy_pass_hash:
+        print("VPSMCP_PROXY_PASS_HASH is not set; run `sudo vpsmcp proxy-password` first",
+              file=sys.stderr)
+        return 2
+    logging.getLogger("vpsmcp").info(
+        "starting egress proxy on %s:%s", s.proxy_bind_host, s.proxy_bind_port)
+    try:
+        asyncio.run(serve(s, Audit(s.audit_path)))
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+def cmd_proxy_password() -> int:
+    """Set the egress-proxy password (VPSMCP_PROXY_PASS_HASH) in the env file."""
+    import os
+
+    from .auth.keys import hash_password
+    from .setup import set_env_line
+
+    if os.geteuid() != 0:
+        print("run with sudo: sudo vpsmcp proxy-password", file=sys.stderr)
+        return 1
+    path = Path(os.environ.get("VPSMCP_ENV_FILE", DEFAULT_ENV_FILE))
+    if not path.exists():
+        print(f"{path} does not exist; run `sudo vpsmcp setup` first", file=sys.stderr)
+        return 2
+    while True:
+        pw = getpass.getpass("new egress-proxy password: ")
+        if len(pw) < 12:
+            print("password must be at least 12 characters; try again", file=sys.stderr)
+            continue
+        if pw != getpass.getpass("repeat: "):
+            print("passwords do not match; try again", file=sys.stderr)
+            continue
+        break
+    set_env_line(path, "VPSMCP_PROXY_PASS_HASH", hash_password(pw))
+    set_env_line(path, "VPSMCP_PROXY_ENABLE", "1")
+    print(f"wrote VPSMCP_PROXY_PASS_HASH and VPSMCP_PROXY_ENABLE=1 in {path}")
+    if Path("/run/systemd/system").is_dir():
+        import subprocess
+        subprocess.run(["systemctl", "restart", "vpsmcp-proxy"])
+        print("restarted vpsmcp-proxy (enable it first with: "
+              "sudo systemctl enable --now vpsmcp-proxy)")
+    else:
+        print("now start it: sudo systemctl enable --now vpsmcp-proxy")
     return 0
 
 
@@ -483,7 +542,7 @@ def cmd_revoke(client_id: str) -> int:
 def main(argv: list[str]) -> int:
     _setup_logging()
     cmd = argv[1] if len(argv) > 1 else "serve"
-    if cmd not in ("hash-password", "set-password", "setup"):
+    if cmd not in ("hash-password", "set-password", "proxy-password", "setup"):
         src = _load_env_file()
         if src and cmd != "serve":
             print(f"config: {src}\n", file=sys.stderr)
@@ -507,6 +566,10 @@ def _dispatch(cmd: str, argv: list[str]) -> int:
         return cmd_hash_password()
     if cmd in ("set-password", "set_password"):
         return cmd_set_password()
+    if cmd == "proxy":
+        return cmd_proxy()
+    if cmd in ("proxy-password", "proxy_password"):
+        return cmd_proxy_password()
     if cmd == "check":
         return cmd_check()
     if cmd == "setup":

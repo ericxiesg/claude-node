@@ -412,6 +412,47 @@ def run(argv: list[str]) -> int:
                    password if generated else None, argv, flag)
 
 
+def _proxy_systemd_unit() -> str:
+    """Optional egress forward proxy. Installed but not enabled by setup; turn it
+    on with `sudo vpsmcp proxy-password` + `systemctl enable --now vpsmcp-proxy`."""
+    return f"""[Unit]
+Description=VPS Fleet MCP egress proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=vpsmcp
+Group=vpsmcp
+EnvironmentFile={ENVFILE}
+WorkingDirectory={APP}
+ExecStart={APP}/.venv/bin/python -m vpsmcp proxy
+Restart=always
+RestartSec=3
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+ReadOnlyPaths={ETC}
+UMask=0077
+LimitNOFILE=8192
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
 def _systemd_unit() -> str:
     return f"""[Unit]
 Description=VPS Fleet MCP Gateway
@@ -481,6 +522,10 @@ def _finish(domain, mcp_path, bind_host, bind_port, email, admin_user,
     # ---- systemd ----
     say("systemd unit")
     Path("/etc/systemd/system/vpsmcp.service").write_text(_systemd_unit(), encoding="utf-8")
+    # Egress proxy unit is installed but left disabled; enable it only after
+    # `vpsmcp proxy-password` sets a credential.
+    Path("/etc/systemd/system/vpsmcp-proxy.service").write_text(
+        _proxy_systemd_unit(), encoding="utf-8")
     have_systemd = Path("/run/systemd/system").is_dir()
     if not have_systemd:
         warn("not booted with systemd (container?); unit written but not started")

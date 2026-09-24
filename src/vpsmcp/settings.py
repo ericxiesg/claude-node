@@ -46,6 +46,16 @@ class Settings:
     # Network
     trusted_proxy_hops: int
 
+    # Egress proxy (optional; nodes opt in at enrollment)
+    proxy_enable: bool
+    proxy_bind_host: str
+    proxy_bind_port: int
+    proxy_user: str
+    proxy_pass_hash: str
+    proxy_connect_timeout: int
+    proxy_tls_cert: str
+    proxy_tls_key: str
+
     # SSH
     ssh_key_path: Path
     ssh_key_passphrase: str | None
@@ -130,6 +140,14 @@ class Settings:
             bind_host=_s("VPSMCP_BIND_HOST", "127.0.0.1"),
             bind_port=_i("VPSMCP_BIND_PORT", 8848),
             trusted_proxy_hops=_i("VPSMCP_TRUSTED_PROXY_HOPS", 1),
+            proxy_enable=_b("VPSMCP_PROXY_ENABLE", False),
+            proxy_bind_host=_s("VPSMCP_PROXY_BIND_HOST", "0.0.0.0"),
+            proxy_bind_port=_i("VPSMCP_PROXY_PORT", 8443),
+            proxy_user=_s("VPSMCP_PROXY_USER", "node"),
+            proxy_pass_hash=_s("VPSMCP_PROXY_PASS_HASH", ""),
+            proxy_connect_timeout=_i("VPSMCP_PROXY_CONNECT_TIMEOUT", 15),
+            proxy_tls_cert=_s("VPSMCP_PROXY_TLS_CERT", ""),
+            proxy_tls_key=_s("VPSMCP_PROXY_TLS_KEY", ""),
             data_dir=data_dir,
             inventory_path=Path(_s("VPSMCP_INVENTORY", "/etc/vpsmcp/hosts.yaml")),
             audit_path=Path(_s("VPSMCP_AUDIT_LOG", str(data_dir / "audit.jsonl"))),
