@@ -71,7 +71,15 @@ class SSHPool:
 
     def _known_hosts(self, host: Host):
         if host.host_key:
-            line = f"[{host.address}]:{host.port} {host.host_key}\n{host.address} {host.host_key}\n"
+            # Defence in depth: the key is validated at enrollment, but hosts.yaml
+            # can also be hand-edited. Refuse to template a multi-line / malformed
+            # key into the known_hosts document, where it would inject entries.
+            from ..inventory import valid_host_key
+            if not valid_host_key(host.host_key.strip()):
+                raise SSHError(
+                    f"{host.alias}: host_key is not a single valid SSH public key line")
+            key = host.host_key.strip()
+            line = f"[{host.address}]:{host.port} {key}\n{host.address} {key}\n"
             return asyncssh.import_known_hosts(line)
         if self.s.strict_host_keys:
             p = self.s.known_hosts_path
