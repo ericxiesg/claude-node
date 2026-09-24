@@ -5,6 +5,7 @@ hosts.yaml is hand-maintained; hosts.d/<node_id>.yaml is written by enrollment.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import re
 from dataclasses import dataclass, field
@@ -155,6 +156,34 @@ def load_inventory(path: Path) -> Inventory:
                 x.alias == h.jump for x in hosts.values()):
             raise InventoryError(f"{h.alias}: jump target {h.jump} not found")
     return Inventory(hosts=hosts, path=path, mtime=_mtime(path))
+
+
+# <type> <base64-blob> [comment]. No embedded newline or extra whitespace: a
+# host_key is templated into an SSH known_hosts document, and a value with a
+# newline would inject additional entries (e.g. a wildcard trusting an attacker
+# key). Enrollment supplies this field, so it is untrusted input.
+_KEY_TYPES = ("ssh-ed25519", "ssh-rsa", "ssh-dss",
+              "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+              "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com")
+
+
+def valid_host_key(value: str) -> bool:
+    """True if value is exactly one well-formed SSH public host key line."""
+    if not value or "\n" in value or "\r" in value:
+        return False
+    parts = value.split(" ")
+    if len(parts) < 2 or parts[0] not in _KEY_TYPES:
+        return False
+    blob = parts[1]
+    try:
+        raw = base64.b64decode(blob, validate=True)
+    except Exception:  # noqa: BLE001
+        return False
+    # The blob is an SSH string: 4-byte length prefix + the key type repeated.
+    if len(raw) < 4:
+        return False
+    n = int.from_bytes(raw[:4], "big")
+    return 4 + n <= len(raw) and raw[4:4 + n].decode("ascii", "replace") == parts[0]
 
 
 def node_id_of(address: str, port: int, user: str) -> str:

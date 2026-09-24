@@ -411,8 +411,11 @@ class EnrollService:
             return JSONResponse({"ok": False, "code": "E_BAD_REQUEST",
                                  "msg": "malformed request"}, 400)
 
+        from .inventory import valid_host_key
         host_key = str(body.get("host_key", "")).strip()
-        if not host_key.startswith(("ssh-ed25519 ", "ecdsa-sha2-", "ssh-rsa ")):
+        # Strict single-line validation: this value is templated into a known_hosts
+        # document, so a newline would inject extra entries.
+        if not valid_host_key(host_key):
             return JSONResponse({"ok": False, "code": "E_BAD_REQUEST",
                                  "msg": "bad host key format"}, 400)
         if not ip:
