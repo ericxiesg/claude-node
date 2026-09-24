@@ -15,6 +15,33 @@ from ..ssh.logs import LogError
 from ..ssh.tunnels import TunnelError
 
 
+async def _http_capped(method: str, url: str, *, headers: dict, content: bytes | None,
+                       timeout: int, cap: int) -> tuple[int, dict, str, bool]:
+    """One HTTP request whose response body is read streaming and stopped at cap.
+
+    The target sits on the far end of a tunnel to a node, which can be a
+    compromised machine. `response.text` / `.read()` would buffer the whole body
+    into the gateway's memory first; a node serving an endless or huge body would
+    OOM it. Streaming and breaking at cap+1 bounds memory to ~cap and aborts the
+    rest of the download.
+    """
+    buf = bytearray()
+    truncated = False
+    async with httpx.AsyncClient(timeout=timeout) as c:
+        async with c.stream(method, url, headers=headers,
+                            content=content) as r:
+            async for chunk in r.aiter_bytes():
+                room = cap - len(buf)
+                if room > 0:
+                    buf.extend(chunk[:room])
+                if len(chunk) > max(room, 0):
+                    truncated = True
+                    break
+            resp_headers = dict(r.headers)
+            encoding = r.encoding or "utf-8"
+    return r.status_code, resp_headers, bytes(buf).decode(encoding, "replace"), truncated
+
+
 def register(mcp: FastMCP, rt: Runtime) -> None:
 
     # ---------------- detached jobs ----------------
@@ -187,17 +214,16 @@ def register(mcp: FastMCP, rt: Runtime) -> None:
         except TunnelError as exc:
             raise ToolError(str(exc)) from exc
         url = f"http://127.0.0.1:{t.local_port}{path if path.startswith('/') else '/' + path}"
+        cap = rt.s.max_output_bytes
         try:
-            async with httpx.AsyncClient(timeout=timeout) as c:
-                r = await c.request(method.upper(), url, headers=headers or {},
-                                    content=body.encode() if body else None)
+            status, hdrs, text, truncated = await _http_capped(
+                method.upper(), url, headers=headers or {},
+                content=body.encode() if body else None, timeout=timeout, cap=cap)
         except Exception as exc:  # noqa: BLE001
             raise ToolError(f"tunnel request failed: {exc}") from exc
-        text = r.text[: rt.s.max_output_bytes]
         rt.record("tunnel_http", tunnel_id=tunnel_id, host=t.alias,
-                  method=method, path=path, status=r.status_code)
-        return {"status": r.status_code, "headers": dict(r.headers),
-                "body": text, "truncated": len(r.text) > len(text)}
+                  method=method, path=path, status=status)
+        return {"status": status, "headers": hdrs, "body": text, "truncated": truncated}
 
     @mcp.tool
     async def tunnel_close(
