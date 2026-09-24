@@ -18,6 +18,44 @@ class LogError(RuntimeError):
     pass
 
 
+# A single log line is capped so a compromised node cannot exhaust the gateway's
+# memory by streaming forever without a newline: the ring buffer bounds the line
+# *count*, not the length of any one line, and readline() would buffer an endless
+# line whole. Anything longer is truncated and the rest of that line discarded.
+MAX_LINE_CHARS = 65_536
+_TRUNC = " …[vpsmcp: line truncated]"
+
+
+async def _capped_lines(stream, max_line: int):
+    """Yield newline-delimited lines from an asyncssh reader, each at most
+    max_line characters. Memory stays bounded by ~max_line regardless of what the
+    remote sends, because an over-long line is emitted truncated and its tail is
+    dropped up to the next newline rather than buffered."""
+    buf = ""
+    skipping = False  # inside the discarded tail of an over-long line
+    while True:
+        chunk = await stream.read(65536)
+        if not chunk:
+            if buf and not skipping:
+                yield buf[:max_line] + (_TRUNC if len(buf) > max_line else "")
+            return
+        buf += chunk
+        while True:
+            nl = buf.find("\n")
+            if nl == -1:
+                if len(buf) > max_line:
+                    if not skipping:
+                        yield buf[:max_line] + _TRUNC
+                        skipping = True
+                    buf = ""  # discard the overflow; still seeking the newline
+                break
+            line, buf = buf[:nl], buf[nl + 1:]
+            if skipping:
+                skipping = False  # this newline ends the over-long line; drop its tail
+            else:
+                yield line[:max_line] + (_TRUNC if len(line) > max_line else "")
+
+
 @dataclass
 class LogSub:
     id: str
@@ -73,14 +111,11 @@ class LogManager:
 
     async def _pump(self, sub: LogSub) -> None:
         try:
-            while True:
-                line = await sub.process.stdout.readline()
-                if not line:
-                    break
+            async for line in _capped_lines(sub.process.stdout, MAX_LINE_CHARS):
                 if len(sub.buf) == sub.buf.maxlen:
                     sub.dropped += 1
                 sub.seq += 1
-                sub.buf.append((sub.seq, time.time(), line.rstrip("\n")))
+                sub.buf.append((sub.seq, time.time(), line))
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
