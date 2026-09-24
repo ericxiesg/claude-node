@@ -81,6 +81,29 @@ def _resolve(host: str) -> list[str]:
         return []
 
 
+MIN_PASSWORD_LEN = 12
+
+
+def prompt_admin_password(ask=getpass.getpass, notify=bad) -> str | None:
+    """Interactively read the admin password, re-prompting on a rejected entry.
+
+    A too-short password or a mismatched repeat used to abort the whole setup
+    (`return 2`); now it just prints why and asks again. An empty entry returns
+    None, meaning "generate one".
+    """
+    while True:
+        p1 = ask("  admin password (empty = generate): ")
+        if not p1:
+            return None
+        if len(p1) < MIN_PASSWORD_LEN:
+            notify(f"password must be at least {MIN_PASSWORD_LEN} characters; try again")
+            continue
+        if p1 != ask("  repeat: "):
+            notify("passwords do not match; try again")
+            continue
+        return p1
+
+
 def gen_password(n: int = 20) -> str:
     alpha = string.ascii_letters + string.digits + "!@#%^&*-_=+"
     return "".join(secrets.choice(alpha) for _ in range(n))
@@ -246,20 +269,11 @@ def run(argv: list[str]) -> int:
     # ---- password ----
     password = opt("--password")
     generated = False
+    if not password and tty:
+        password = prompt_admin_password()
     if not password:
-        if tty:
-            p1 = getpass.getpass("  admin password (empty = generate): ")
-            if p1:
-                if len(p1) < 12:
-                    bad("password must be at least 12 characters")
-                    return 2
-                if p1 != getpass.getpass("  repeat: "):
-                    bad("passwords do not match")
-                    return 2
-                password = p1
-        if not password:
-            password = gen_password()
-            generated = True
+        password = gen_password()
+        generated = True
 
     # ---- accounts and directories ----
     say("accounts and directories")
