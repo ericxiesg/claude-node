@@ -71,6 +71,7 @@ curl -sSf https://mcp.example.com/enroll/install.sh | sudo bash
 ... | sudo bash -s -- --alias web-01                 # 指定名字
 ... | sudo bash -s -- --alias web-01 --tags prod,hk  # 带标签
 ... | sudo bash -s -- --user deploy                  # 换本机账号名
+... | sudo bash -s -- --self                         # 用你的 ssh 登录用户($SUDO_USER)
 ... | sudo bash -s -- -k <口令>                       # 服务端设了 VPSMCP_ENROLL_KEY 时
 ... | sudo bash -s -- -v                             # 排障看每一步
 ... | sudo bash -s -- --uninstall                    # 摘除本机
@@ -91,6 +92,10 @@ curl -sSf https://mcp.example.com/enroll/install.sh | bash -s -- --rootless
 （没有 root 读不到 sshd 配置）。代价：网关此后以你的账号操作，隔离性等同于该账号——
 除非你接受「网关等于在这台机上有 root」，否则别用能 sudo 的用户。默认（带 `sudo`）
 会另建一个无 sudo 的低权限 `ops` 账号，这正是它需要 root 的原因。
+
+想让「ssh 登录用户」成为整个 fleet 的默认(这样只写 `--alias NAME`、不带
+`--user`/`--self` 就用登录用户接入),在网关上设 `VPSMCP_ENROLL_USER='@session'`
+再重启。sudo 风险同上:网关此后能做的事等同于你那个登录账号。
 
 新节点默认权限 `fleet.read,fleet.exec,fleet.write`（`VPSMCP_ENROLL_SCOPES`）。
 

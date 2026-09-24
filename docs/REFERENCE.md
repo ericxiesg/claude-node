@@ -188,7 +188,7 @@ password hash contains `$`.
 | `VPSMCP_ENROLL_MODE` | `open` | `open` / `approve` / `off` |
 | `VPSMCP_ENROLL_KEY` | empty | installer must pass `-k` |
 | `VPSMCP_ENROLL_ALLOW_CIDRS` | empty | source restriction |
-| `VPSMCP_ENROLL_USER` | `ops` | account created on nodes |
+| `VPSMCP_ENROLL_USER` | `ops` | account created on nodes; the special value `@session` means each enrollment uses the invoking ssh login user (`$SUDO_USER`) unless `--user` is passed |
 | `VPSMCP_ENROLL_SCOPES` | `fleet.read,fleet.exec,fleet.write` | new-node defaults |
 | `VPSMCP_ACCESS_TTL` / `_REFRESH_TTL` | `900` / `2592000` | seconds |
 | `VPSMCP_CODE_TTL` | `120` | authorization code lifetime, seconds |
