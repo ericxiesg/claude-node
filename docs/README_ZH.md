@@ -79,6 +79,19 @@ curl -sSf https://mcp.example.com/enroll/install.sh | sudo bash
 节点上只落一个低权限账号和网关的**公钥**，不装代码、不下发私钥。
 同一台机器重复执行是原地更新，不会新增条目。
 
+**免 root**（不建专用账号，网关直接以「你」这个用户登录）：
+
+```bash
+curl -sSf https://mcp.example.com/enroll/install.sh | bash -s -- --rootless
+... | bash -s -- --rootless --port 2222              # 非默认 SSH 端口
+```
+
+免 root 模式只把网关公钥追加到你自己的 `~/.ssh/authorized_keys`，不碰任何系统配置，
+所以你的账号必须已经开了 `PubkeyAuthentication`，端口非 22 时要自己带 `--port`
+（没有 root 读不到 sshd 配置）。代价：网关此后以你的账号操作，隔离性等同于该账号——
+除非你接受「网关等于在这台机上有 root」，否则别用能 sudo 的用户。默认（带 `sudo`）
+会另建一个无 sudo 的低权限 `ops` 账号，这正是它需要 root 的原因。
+
 新节点默认权限 `fleet.read,fleet.exec,fleet.write`（`VPSMCP_ENROLL_SCOPES`）。
 
 任何知道 URL 的人都能把自己的机器注册进来。收紧：

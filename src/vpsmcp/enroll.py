@@ -136,10 +136,18 @@ ENROLL_SH = r'''#!/usr/bin/env bash
 #
 #   curl -sSf __BASE__/enroll/install.sh | sudo bash
 #   curl -sSf __BASE__/enroll/install.sh | sudo bash -s -- --alias web-01 --tags prod
+#   curl -sSf __BASE__/enroll/install.sh | bash -s -- --rootless   # no root
 #
 #   --alias NAME   node name, defaults to this machine's hostname
 #   --tags a,b     tags
-#   --user NAME    local account to create, default __DEFUSER__
+#   --user NAME    local account to create, default __DEFUSER__ (root mode only)
+#   --rootless     enroll the current user without root; no account is created
+#                  and sshd is not touched, so PubkeyAuthentication must already
+#                  be enabled for you. The gateway then logs in as your own user,
+#                  which is only as isolated as that account - do not use it for a
+#                  user that can sudo unless you accept the gateway acting as root.
+#   --port N       SSH port to register; needed with --rootless on a non-default
+#                  port, since detecting it from sshd usually needs root
 #   -k KEY         enrollment key, if the server requires one
 #   -v             verbose, for troubleshooting
 #   --uninstall    detach this machine
@@ -152,12 +160,16 @@ TAGS=""
 KEY=""
 V=0
 MODE=install
+ROOTLESS=0
+PORT_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --alias) ALIAS="${2:-}"; shift 2 ;;
     --tags)  TAGS="${2:-}";  shift 2 ;;
     --user)  NODE_USER="${2:-}"; shift 2 ;;
+    --rootless) ROOTLESS=1; shift ;;
+    --port) PORT_OVERRIDE="${2:-}"; shift 2 ;;
     -k|--key) KEY="${2:-}"; shift 2 ;;
     -v|--verbose) V=1; shift ;;
     --uninstall) MODE=uninstall; shift ;;
@@ -168,7 +180,18 @@ done
 log() { [[ $V -eq 1 ]] && printf '%s\n' "$*" >&2 || true; }
 die() { printf 'vpsmcp: %s\n' "$1" >&2; exit "${2:-1}"; }
 
-[[ $EUID -eq 0 ]] || die "root required"
+# Root creates a dedicated unprivileged account and can enable pubkey auth.
+# Without root, --rootless enrolls the current user in place instead.
+if [[ $EUID -ne 0 ]]; then
+  [[ $ROOTLESS -eq 1 ]] || die "root required; re-run with sudo, or pass --rootless to enroll your own user without root (needs PubkeyAuthentication already enabled for you)"
+fi
+[[ $EUID -eq 0 ]] && ROOTLESS=0
+if [[ $ROOTLESS -eq 1 ]]; then
+  ME="$(id -un)"
+  [[ "$NODE_USER" == "__DEFUSER__" || "$NODE_USER" == "$ME" ]] \
+    || log "ignoring --user $NODE_USER; rootless enrolls the current user"
+  NODE_USER="$ME"
+fi
 [[ -n "$ALIAS" ]] || ALIAS="$(hostname -s 2>/dev/null || hostname || echo node)"
 ALIAS="$(printf '%s' "$ALIAS" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-64)"
 
@@ -190,6 +213,7 @@ if [[ "$MODE" == uninstall ]]; then
   fi
   PORT=$($SSHD -T 2>/dev/null | awk '/^port /{print $2; exit}') || PORT=""
   PORT="${PORT:-22}"
+  [[ -n "$PORT_OVERRIDE" ]] && PORT="$PORT_OVERRIDE"
   curl -sSf -X POST "$BASE/enroll/deregister" -H 'content-type: application/json' \
        --data "{\"user\":\"$NODE_USER\",\"port\":$PORT}" >/dev/null 2>&1 || true
   exit 0
@@ -199,45 +223,68 @@ fi
 log "checking sshd"
 PORT=$($SSHD -T 2>/dev/null | awk '/^port /{print $2; exit}') || PORT=""
 PORT="${PORT:-22}"
-PK=$($SSHD -T -C "user=$NODE_USER,host=127.0.0.1,addr=127.0.0.1" 2>/dev/null \
-     | awk '/^pubkeyauthentication/{print $2}') || PK=""
-if [[ "$PK" == "no" ]]; then
-  log "enabling public key auth for $NODE_USER"
-  install -d -m 755 /etc/ssh/sshd_config.d
-  printf 'Match User %s\n    PubkeyAuthentication yes\n' "$NODE_USER" \
-    > "/etc/ssh/sshd_config.d/60-vpsmcp-$NODE_USER.conf"
-  $SSHD -t 2>/dev/null || {
-    rm -f "/etc/ssh/sshd_config.d/60-vpsmcp-$NODE_USER.conf"
-    die "cannot enable public key auth for this account"
-  }
-  NEW=$($SSHD -T -C "user=$NODE_USER,host=127.0.0.1,addr=127.0.0.1" 2>/dev/null \
-        | awk '/^pubkeyauthentication/{print $2}') || NEW=""
-  [[ "$NEW" == "yes" ]] || die "public key auth overridden by another config"
-  systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null \
-    || service ssh reload >/dev/null 2>&1 || true
+[[ -n "$PORT_OVERRIDE" ]] && PORT="$PORT_OVERRIDE"
+if [[ $ROOTLESS -eq 0 ]]; then
+  PK=$($SSHD -T -C "user=$NODE_USER,host=127.0.0.1,addr=127.0.0.1" 2>/dev/null \
+       | awk '/^pubkeyauthentication/{print $2}') || PK=""
+  if [[ "$PK" == "no" ]]; then
+    log "enabling public key auth for $NODE_USER"
+    install -d -m 755 /etc/ssh/sshd_config.d
+    printf 'Match User %s\n    PubkeyAuthentication yes\n' "$NODE_USER" \
+      > "/etc/ssh/sshd_config.d/60-vpsmcp-$NODE_USER.conf"
+    $SSHD -t 2>/dev/null || {
+      rm -f "/etc/ssh/sshd_config.d/60-vpsmcp-$NODE_USER.conf"
+      die "cannot enable public key auth for this account"
+    }
+    NEW=$($SSHD -T -C "user=$NODE_USER,host=127.0.0.1,addr=127.0.0.1" 2>/dev/null \
+          | awk '/^pubkeyauthentication/{print $2}') || NEW=""
+    [[ "$NEW" == "yes" ]] || die "public key auth overridden by another config"
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null \
+      || service ssh reload >/dev/null 2>&1 || true
+  fi
+else
+  # Rootless cannot change sshd; warn if we can even tell it is off. sshd -T
+  # usually needs root, so this is best-effort - the gateway's connect-back is
+  # the real check, and it fails clearly if pubkey auth is disabled for you.
+  PK=$($SSHD -T -C "user=$NODE_USER,host=127.0.0.1,addr=127.0.0.1" 2>/dev/null \
+       | awk '/^pubkeyauthentication/{print $2}') || PK=""
+  [[ "$PK" == "no" ]] && printf 'vpsmcp: warning: PubkeyAuthentication is off for %s; enrollment will fail until an admin enables it\n' "$NODE_USER" >&2
 fi
 
 # account
-log "configuring $NODE_USER"
-id -u "$NODE_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$NODE_USER"
-# useradd leaves '!' in shadow; harmless with UsePAM yes, rejected with UsePAM no
-cur=$(getent shadow "$NODE_USER" | cut -d: -f2)
-case "$cur" in ""|"!"|"!!") usermod -p '*' "$NODE_USER" ;; esac
-HOME_DIR=$(getent passwd "$NODE_USER" | cut -d: -f6)
-[[ -n "$HOME_DIR" ]] || die "$NODE_USER has no home directory"
-
 GW_PUBKEY=$(curl -sSf "$BASE/enroll/pubkey" 2>/dev/null) || die "cannot reach the service" 4
 [[ "$GW_PUBKEY" == ssh-* ]] || die "unexpected response from the service" 4
 
-install -d -m 700 -o "$NODE_USER" -g "$NODE_USER" "$HOME_DIR/.ssh"
-touch "$HOME_DIR/.ssh/authorized_keys"
-grep -qxF "$GW_PUBKEY" "$HOME_DIR/.ssh/authorized_keys" \
-  || echo "$GW_PUBKEY" >> "$HOME_DIR/.ssh/authorized_keys"
-chmod 600 "$HOME_DIR/.ssh/authorized_keys"
-chown -R "$NODE_USER:$NODE_USER" "$HOME_DIR/.ssh"
-# install -d only applies -o to the last component, so create both explicitly
-install -d -m 700 -o "$NODE_USER" -g "$NODE_USER" "$HOME_DIR/.vpsmcp"
-install -d -m 700 -o "$NODE_USER" -g "$NODE_USER" "$HOME_DIR/.vpsmcp/jobs"
+if [[ $ROOTLESS -eq 0 ]]; then
+  log "configuring $NODE_USER"
+  id -u "$NODE_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$NODE_USER"
+  # useradd leaves '!' in shadow; harmless with UsePAM yes, rejected with UsePAM no
+  cur=$(getent shadow "$NODE_USER" | cut -d: -f2)
+  case "$cur" in ""|"!"|"!!") usermod -p '*' "$NODE_USER" ;; esac
+  HOME_DIR=$(getent passwd "$NODE_USER" | cut -d: -f6)
+  [[ -n "$HOME_DIR" ]] || die "$NODE_USER has no home directory"
+
+  install -d -m 700 -o "$NODE_USER" -g "$NODE_USER" "$HOME_DIR/.ssh"
+  touch "$HOME_DIR/.ssh/authorized_keys"
+  grep -qxF "$GW_PUBKEY" "$HOME_DIR/.ssh/authorized_keys" \
+    || echo "$GW_PUBKEY" >> "$HOME_DIR/.ssh/authorized_keys"
+  chmod 600 "$HOME_DIR/.ssh/authorized_keys"
+  chown -R "$NODE_USER:$NODE_USER" "$HOME_DIR/.ssh"
+  # install -d only applies -o to the last component, so create both explicitly
+  install -d -m 700 -o "$NODE_USER" -g "$NODE_USER" "$HOME_DIR/.vpsmcp"
+  install -d -m 700 -o "$NODE_USER" -g "$NODE_USER" "$HOME_DIR/.vpsmcp/jobs"
+else
+  log "configuring your own account ($NODE_USER)"
+  HOME_DIR="${HOME:-$(getent passwd "$NODE_USER" | cut -d: -f6)}"
+  [[ -n "$HOME_DIR" ]] || die "$NODE_USER has no home directory"
+  # Own home: no root, no chown - we already own everything we touch.
+  mkdir -p "$HOME_DIR/.ssh"; chmod 700 "$HOME_DIR/.ssh"
+  touch "$HOME_DIR/.ssh/authorized_keys"
+  grep -qxF "$GW_PUBKEY" "$HOME_DIR/.ssh/authorized_keys" \
+    || echo "$GW_PUBKEY" >> "$HOME_DIR/.ssh/authorized_keys"
+  chmod 600 "$HOME_DIR/.ssh/authorized_keys"
+  mkdir -p "$HOME_DIR/.vpsmcp/jobs"; chmod 700 "$HOME_DIR/.vpsmcp" "$HOME_DIR/.vpsmcp/jobs"
+fi
 
 # register
 log "registering $ALIAS"
