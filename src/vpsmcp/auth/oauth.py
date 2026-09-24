@@ -37,6 +37,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
+from ..netutil import client_ip
 from ..settings import SCOPES, Settings
 from .clients import enabled_profiles, guess_client, profile_for_redirect
 from .keys import KeyStore, verify_password
@@ -123,12 +124,8 @@ class AuthorizationServer:
         sid = self._unsign(raw)
         return self.store.get_session(sid) if sid else None
 
-    @staticmethod
-    def _client_ip(request: Request) -> str:
-        xff = request.headers.get("x-forwarded-for")
-        if xff:
-            return xff.split(",")[0].strip()
-        return request.client.host if request.client else "?"
+    def _client_ip(self, request: Request) -> str:
+        return client_ip(request, self.s.trusted_proxy_hops) or "?"
 
     # ---------------- redirect_uri allowlist ----------------
     def redirect_prefixes(self) -> tuple[str, ...]:

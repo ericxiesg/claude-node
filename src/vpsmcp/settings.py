@@ -43,6 +43,9 @@ class Settings:
     inventory_path: Path
     audit_path: Path
 
+    # Network
+    trusted_proxy_hops: int
+
     # SSH
     ssh_key_path: Path
     ssh_key_passphrase: str | None
@@ -126,6 +129,7 @@ class Settings:
             mcp_path="/" + _s("VPSMCP_MCP_PATH", "/mcp").strip("/"),
             bind_host=_s("VPSMCP_BIND_HOST", "127.0.0.1"),
             bind_port=_i("VPSMCP_BIND_PORT", 8848),
+            trusted_proxy_hops=_i("VPSMCP_TRUSTED_PROXY_HOPS", 1),
             data_dir=data_dir,
             inventory_path=Path(_s("VPSMCP_INVENTORY", "/etc/vpsmcp/hosts.yaml")),
             audit_path=Path(_s("VPSMCP_AUDIT_LOG", str(data_dir / "audit.jsonl"))),

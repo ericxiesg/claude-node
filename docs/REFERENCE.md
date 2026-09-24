@@ -170,6 +170,7 @@ password hash contains `$`.
 | `VPSMCP_PUBLIC_URL` | — | bare domain, no path |
 | `VPSMCP_MCP_PATH` | `/mcp` | resource URL = public_url + this |
 | `VPSMCP_BIND_HOST` / `_PORT` | `127.0.0.1` / `8848` | |
+| `VPSMCP_TRUSTED_PROXY_HOPS` | `1` | reverse proxies in front of the app; the client IP is taken this many entries from the right of `X-Forwarded-For`. `1` for one Caddy/nginx (the default setup), `2` behind a CDN or load balancer that also appends, `0` if the app is bound to a public port with no proxy (the header is then ignored). Getting this wrong does not expose data, but too high trusts a forged prefix and too low buckets every caller under the proxy |
 | `VPSMCP_DATA_DIR` | `/var/lib/vpsmcp` | keys, `oauth.db`, audit log |
 | `VPSMCP_INVENTORY` | `/etc/vpsmcp/hosts.yaml` | `hosts.d/` sits next to it |
 | `VPSMCP_AUDIT_LOG` | `$DATA_DIR/audit.jsonl` | |

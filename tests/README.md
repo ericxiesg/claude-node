@@ -59,6 +59,10 @@ python3 tests/test_oauth_flow.py  $D/token.json   # 14 OAuth assertions
 python3 tests/test_client_compat.py               # 15 client-compatibility assertions
 python3 tests/test_tools_e2e.py   $D/token.json   # all tools
 python3 tests/test_scopes.py                      # scope isolation, token forgery
+SKIP_LIVE=1 python3 tests/test_client_ip_spoof.py # X-Forwarded-For unit checks (no server)
+# full spoof test needs the lab started with:
+#   VPSMCP_TRUSTED_PROXY_HOPS=0 VPSMCP_ENROLL_MODE=approve VPSMCP_ENROLL_ALLOW_CIDRS=203.0.113.0/24
+python3 tests/test_client_ip_spoof.py             # CIDR allowlist + lockout not spoofable
 python3 tests/test_gateway_node.py $TOKEN_FILE    # on a real gateway installed with --self-enroll (host alias gw)
 ```
 
@@ -90,6 +94,9 @@ file obtained against it.
   detection, audience binding
 - 401 with `WWW-Authenticate`, tampered signature, forged audience and algorithm
 - Scope isolation: a read-only token reaches no exec/write/admin tool
+- Source-address spoofing: X-Forwarded-For cannot forge the client IP, so the
+  enroll CIDR allowlist and the login/enroll rate limiter cannot be bypassed
+  (client_ip takes the proxy-appended entry, keyed off VPSMCP_TRUSTED_PROXY_HOPS)
 - exec exit codes, timeout really killing the process, output truncation,
   guardrail refusal and `confirm=true` pass-through
 - Persistent shell keeping cwd and variables; chunked file read/write with
