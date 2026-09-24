@@ -86,6 +86,21 @@ Silent: no output, exit 0. The node name defaults to its hostname.
 The node gets a low-privilege account and the gateway's **public** key. No code,
 no private keys. Re-running on the same machine updates the entry in place.
 
+**Without root** (no dedicated account is created — the gateway logs in as *you*):
+
+```bash
+curl -sSf https://mcp.example.com/enroll/install.sh | bash -s -- --rootless
+... | bash -s -- --rootless --port 2222              # non-default SSH port
+```
+
+Rootless appends the gateway key to your own `~/.ssh/authorized_keys` and touches
+nothing system-wide, so `PubkeyAuthentication` must already be enabled for you and
+you may need `--port` (it can't read sshd's config without root). The trade-off:
+the gateway then acts as your account, which is only as isolated as that account —
+don't enroll a user that can `sudo` unless you accept the gateway effectively
+having root on that box. The default (with `sudo`) creates an unprivileged, no-sudo
+`ops` account instead, which is why it needs root.
+
 New nodes get `fleet.read,fleet.exec,fleet.write` by default
 (`VPSMCP_ENROLL_SCOPES`).
 
