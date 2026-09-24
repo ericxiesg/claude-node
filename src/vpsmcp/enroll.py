@@ -141,6 +141,8 @@ ENROLL_SH = r'''#!/usr/bin/env bash
 #   --alias NAME   node name, defaults to this machine's hostname
 #   --tags a,b     tags
 #   --user NAME    local account to create, default __DEFUSER__ (root mode only)
+#   --self         use the current login user ($SUDO_USER) as the node account
+#                  instead of the shared default; see the sudo note under --rootless
 #   --rootless     enroll the current user without root; no account is created
 #                  and sshd is not touched, so PubkeyAuthentication must already
 #                  be enabled for you. The gateway then logs in as your own user,
@@ -161,6 +163,7 @@ KEY=""
 V=0
 MODE=install
 ROOTLESS=0
+SELF=0
 PORT_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
@@ -169,6 +172,7 @@ while [[ $# -gt 0 ]]; do
     --tags)  TAGS="${2:-}";  shift 2 ;;
     --user)  NODE_USER="${2:-}"; shift 2 ;;
     --rootless) ROOTLESS=1; shift ;;
+    --self) SELF=1; shift ;;
     --port) PORT_OVERRIDE="${2:-}"; shift 2 ;;
     -k|--key) KEY="${2:-}"; shift 2 ;;
     -v|--verbose) V=1; shift ;;
@@ -191,6 +195,15 @@ if [[ $ROOTLESS -eq 1 ]]; then
   [[ "$NODE_USER" == "__DEFUSER__" || "$NODE_USER" == "$ME" ]] \
     || log "ignoring --user $NODE_USER; rootless enrolls the current user"
   NODE_USER="$ME"
+elif [[ $SELF -eq 1 || "$NODE_USER" == "@session" ]]; then
+  # Enroll the login user who ran this (the one behind sudo), not the shared
+  # default account. Under `sudo bash` the current user is root, so the real
+  # login user is $SUDO_USER. This makes the gateway log in as that account,
+  # which is only as isolated as it is - do not use it for a user that can sudo.
+  NODE_USER="${SUDO_USER:-$(id -un)}"
+  [[ "$NODE_USER" != "root" ]] \
+    || die "--self needs a login user; run it via sudo as that user, or pass --user NAME"
+  log "enrolling the login user $NODE_USER"
 fi
 [[ -n "$ALIAS" ]] || ALIAS="$(hostname -s 2>/dev/null || hostname || echo node)"
 ALIAS="$(printf '%s' "$ALIAS" | tr -c 'A-Za-z0-9._-' '-' | cut -c1-64)"

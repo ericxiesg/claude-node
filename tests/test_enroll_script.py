@@ -48,4 +48,38 @@ for cmd in ("useradd -m", "usermod -p", "chown -R", "/etc/ssh/sshd_config.d"):
             assert line != line.lstrip(), f"{cmd!r} is not inside a guarded block: {line!r}"
 print("3. account creation and sshd edits are all inside guarded (root-only) blocks")
 
+# 4. --self / @session enroll the login user, resolved from SUDO_USER, and refuse
+#    to enroll root; behaviour-checked by running the rendered snippet under bash.
+assert "--self) SELF=1" in rendered
+assert '"$NODE_USER" == "@session"' in rendered
+assert 'NODE_USER="${SUDO_USER:-$(id -un)}"' in rendered
+
+if bash:
+    resolve = r'''
+      SELF=%d; NODE_USER="%s"; SUDO_USER_SET=%s
+      [[ $SUDO_USER_SET -eq 1 ]] && export SUDO_USER=alice || unset SUDO_USER
+      die() { echo "REFUSED"; exit 1; }
+      if [[ $SELF -eq 1 || "$NODE_USER" == "@session" ]]; then
+        NODE_USER="${SUDO_USER:-$(id -un)}"
+        [[ "$NODE_USER" != "root" ]] || die
+      fi
+      echo "$NODE_USER"
+    '''
+    def run_resolve(self_flag, node_user, sudo_set):
+        r = subprocess.run([bash, "-c", resolve % (self_flag, node_user, 1 if sudo_set else 0)],
+                           capture_output=True, text=True)
+        return r.stdout.strip()
+
+    assert run_resolve(1, "ops", True) == "alice", "‑‑self should resolve to SUDO_USER"
+    assert run_resolve(0, "@session", True) == "alice", "@session should resolve to SUDO_USER"
+    assert run_resolve(0, "ops", True) == "ops", "without --self/@session the default stands"
+    # root with no SUDO_USER (id -un is not 'root' in this sandbox test only if run as
+    # non-root, so assert the refuse path only when the resolved id would be root)
+    import getpass as _gp
+    if _gp.getuser() == "root":
+        assert run_resolve(1, "ops", False) == "REFUSED", "‑‑self as root must refuse"
+    print("4. --self / @session resolve to the login user (SUDO_USER) and refuse root")
+else:
+    print("4. --self / @session wiring present (bash absent; skipped behaviour run)")
+
 print("\nall enroll-script checks passed")

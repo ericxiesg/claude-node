@@ -78,6 +78,7 @@ Silent: no output, exit 0. The node name defaults to its hostname.
 ... | sudo bash -s -- --alias web-01                 # explicit name
 ... | sudo bash -s -- --alias web-01 --tags prod,hk  # with tags
 ... | sudo bash -s -- --user deploy                  # different local account
+... | sudo bash -s -- --self                         # use your ssh login user ($SUDO_USER)
 ... | sudo bash -s -- -k <key>                       # if VPSMCP_ENROLL_KEY is set
 ... | sudo bash -s -- -v                             # verbose, for debugging
 ... | sudo bash -s -- --uninstall                    # detach this machine
@@ -100,6 +101,11 @@ the gateway then acts as your account, which is only as isolated as that account
 don't enroll a user that can `sudo` unless you accept the gateway effectively
 having root on that box. The default (with `sudo`) creates an unprivileged, no-sudo
 `ops` account instead, which is why it needs root.
+
+To make "the ssh login user" the default for the whole fleet (so plain
+`--alias NAME` enrolls as that user, no `--user`/`--self` needed), set
+`VPSMCP_ENROLL_USER='@session'` on the gateway and restart. Same sudo caveat as
+above: that account is whatever your login user can do.
 
 New nodes get `fleet.read,fleet.exec,fleet.write` by default
 (`VPSMCP_ENROLL_SCOPES`).
