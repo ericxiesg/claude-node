@@ -19,7 +19,8 @@ sudo vpsmcp revoke <client_id>    # revoke a client and all its tokens
 sudo vpsmcp clients               # MCP clients accepted (Claude, Kimi, GLM, ...)
 sudo vpsmcp redirects             # callback allowlist + callbacks turned away
 sudo vpsmcp redirect allow <uri>  # accept one more client, no restart
-sudo vpsmcp hash-password         # new admin password hash
+sudo vpsmcp set-password          # change the admin password and restart
+sudo vpsmcp hash-password         # just print a hash (does not apply it)
 
 sudo tail -f /var/lib/vpsmcp/audit.jsonl | jq
 journalctl -u vpsmcp -f

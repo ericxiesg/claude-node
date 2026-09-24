@@ -178,7 +178,7 @@ password hash contains `$`.
 | `VPSMCP_KNOWN_HOSTS` | `$DATA_DIR/known_hosts` | setup sets `/etc/vpsmcp/known_hosts` |
 | `VPSMCP_CONNECT_TIMEOUT` | `15` | seconds |
 | `VPSMCP_ADMIN_USER` | `admin` | consent page login; setup fills in your login user |
-| `VPSMCP_ADMIN_PASSWORD_HASH` | — | `vpsmcp hash-password` |
+| `VPSMCP_ADMIN_PASSWORD_HASH` | — | set with `vpsmcp set-password`; `vpsmcp hash-password` only prints a hash |
 | `VPSMCP_MAX_OUTPUT_BYTES` | `32000` | per-call output cap |
 | `VPSMCP_MAX_FILE_BYTES` | `4000000` | file read/write cap |
 | `VPSMCP_MAX_FANOUT` | `8` | hosts per `exec_many` |

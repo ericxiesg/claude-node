@@ -141,6 +141,48 @@ def write_env(values: dict[str, str]) -> None:
     _chown(ENVFILE, "root", "vpsmcp", 0o640)
 
 
+def set_env_line(path: Path, key: str, value: str) -> str:
+    """Replace (or append) `key='value'` in an env file, atomically, keeping every
+    other line and the file's owner and mode. Returns 'replaced' or 'added'.
+
+    Single-quoted because the scrypt hash contains `$`; the value never contains a
+    single quote, so no escaping is needed. This is how `set-password` actually
+    applies a new hash - `hash-password` only prints one, which is easy to forget
+    to paste in.
+    """
+    import stat as _stat
+
+    lines: list[str] = []
+    replaced = False
+    if path.exists():
+        for ln in path.read_text(encoding="utf-8").splitlines():
+            stripped = ln.lstrip()
+            head = stripped.split("=", 1)[0].rstrip() if "=" in stripped else ""
+            if head == key and not stripped.startswith("#"):
+                if not replaced:            # replace the first, drop any duplicates
+                    lines.append(f"{key}='{value}'")
+                    replaced = True
+            else:
+                lines.append(ln)
+    if not replaced:
+        lines.append(f"{key}='{value}'")
+    data = "\n".join(lines) + "\n"
+
+    st = path.stat() if path.exists() else None
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(data, encoding="utf-8")
+    if st is not None:
+        try:
+            os.chown(tmp, st.st_uid, st.st_gid)
+        except (PermissionError, OSError):
+            pass
+        os.chmod(tmp, _stat.S_IMODE(st.st_mode))
+    else:
+        _chown(tmp, "root", "vpsmcp", 0o640)
+    tmp.replace(path)
+    return "replaced" if replaced else "added"
+
+
 def read_env() -> dict[str, str]:
     out: dict[str, str] = {}
     if not ENVFILE.exists():
