@@ -295,7 +295,46 @@ sudo tail -5 /var/lib/vpsmcp/audit.jsonl | jq 'select(.event|startswith("enroll"
 
 ---
 
-## <a name="hash"></a>Password never accepted
+## <a name="hash"></a>Password never accepted / how to reset it
+
+Reset the admin password with one command (run on the gateway). It hashes the
+new password, writes it into `/etc/vpsmcp/vpsmcp.env`, and restarts the service:
+
+```bash
+sudo vpsmcp set-password
+```
+
+`vpsmcp hash-password` only **prints** a hash - it does not change anything. If
+you ran it, restarted, and the password still fails, that is why: the printed
+line was never pasted into the env file. Use `set-password`, or paste the line
+yourself (keep the single quotes) and restart.
+
+**Passwords with `!` (or other shell metacharacters):** never put them on a
+command line. `--password "a!b"` and `verify_password("a!b", ...)` in an
+interactive shell both let bash history-expand the `!`, silently changing the
+password. `set-password` (and the login form) read the password with `getpass`,
+which is safe. To test a password against the stored hash without shell mangling:
+
+```bash
+sudo -u vpsmcp /opt/vpsmcp/.venv/bin/python - <<'EOF'
+import getpass
+from vpsmcp.auth.keys import verify_password
+h = next(l.split("=",1)[1].strip().strip("'\"")
+         for l in open("/etc/vpsmcp/vpsmcp.env")
+         if l.startswith("VPSMCP_ADMIN_PASSWORD_HASH="))
+print("MATCH" if verify_password(getpass.getpass("password: "), h) else "NO MATCH")
+EOF
+```
+
+Locked out after several tries (a `429` "Try again in Ns" page) is not a wrong
+password - clear it and check `VPSMCP_TRUSTED_PROXY_HOPS` matches your proxy
+chain:
+
+```bash
+sudo -u vpsmcp /opt/vpsmcp/.venv/bin/python -c "import sqlite3;c=sqlite3.connect('/var/lib/vpsmcp/oauth.db');c.execute('DELETE FROM login_attempts');c.commit()"
+```
+
+### The `$` in the hash
 
 `VPSMCP_ADMIN_PASSWORD_HASH` looks like `scrypt$32768$8$1$salt$dk`. Any shell
 `source` of the env file expands `$32768`, `$8` and `$1` as positional

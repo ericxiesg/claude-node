@@ -15,7 +15,8 @@
     vpsmcp redirects                effective callback allowlist and refused callbacks
     vpsmcp redirect allow <uri>     allow one more callback, no restart
     vpsmcp redirect deny  <uri>
-    vpsmcp hash-password            generate VPSMCP_ADMIN_PASSWORD_HASH
+    vpsmcp set-password             set the admin password and restart (sudo)
+    vpsmcp hash-password            just print a password hash (does not apply it)
 """
 from __future__ import annotations
 
@@ -103,6 +104,47 @@ def cmd_hash_password() -> int:
         return 2
     # quoted: the hash contains $ and would be expanded if the file were sourced
     print("\nVPSMCP_ADMIN_PASSWORD_HASH='" + hash_password(pw) + "'")
+    print("\nThis only prints the hash. To actually change the password, either run"
+          "\n  sudo vpsmcp set-password"
+          "\nor paste the line above into /etc/vpsmcp/vpsmcp.env (keep the single"
+          "\nquotes) and run: sudo systemctl restart vpsmcp", file=sys.stderr)
+    return 0
+
+
+def cmd_set_password() -> int:
+    """Set the admin password and apply it: hash it, write the env file, restart."""
+    import os
+
+    from .auth.keys import hash_password
+    from .setup import set_env_line
+
+    if os.geteuid() != 0:
+        print("run with sudo: sudo vpsmcp set-password", file=sys.stderr)
+        return 1
+    path = Path(os.environ.get("VPSMCP_ENV_FILE", DEFAULT_ENV_FILE))
+    if not path.exists():
+        print(f"{path} does not exist; run `sudo vpsmcp setup` first", file=sys.stderr)
+        return 2
+    # getpass reads the password raw from the tty: characters like ! that the shell
+    # would mangle as an argument are safe here. Re-prompt instead of aborting.
+    while True:
+        pw = getpass.getpass("new admin password: ")
+        if len(pw) < 12:
+            print("password must be at least 12 characters; try again", file=sys.stderr)
+            continue
+        if pw != getpass.getpass("repeat: "):
+            print("passwords do not match; try again", file=sys.stderr)
+            continue
+        break
+    action = set_env_line(path, "VPSMCP_ADMIN_PASSWORD_HASH", hash_password(pw))
+    print(f"{action} VPSMCP_ADMIN_PASSWORD_HASH in {path}")
+    if Path("/run/systemd/system").is_dir():
+        import subprocess
+        r = subprocess.run(["systemctl", "restart", "vpsmcp"])
+        print("restarted vpsmcp; the new password is live" if r.returncode == 0
+              else "wrote the hash, but restart failed; run: sudo systemctl restart vpsmcp")
+        return 0 if r.returncode == 0 else 1
+    print("wrote the hash; now run: sudo systemctl restart vpsmcp")
     return 0
 
 
@@ -436,7 +478,7 @@ def cmd_revoke(client_id: str) -> int:
 def main(argv: list[str]) -> int:
     _setup_logging()
     cmd = argv[1] if len(argv) > 1 else "serve"
-    if cmd not in ("hash-password", "setup"):
+    if cmd not in ("hash-password", "set-password", "setup"):
         src = _load_env_file()
         if src and cmd != "serve":
             print(f"config: {src}\n", file=sys.stderr)
@@ -458,6 +500,8 @@ def _dispatch(cmd: str, argv: list[str]) -> int:
         return cmd_serve()
     if cmd in ("hash-password", "hash_password"):
         return cmd_hash_password()
+    if cmd in ("set-password", "set_password"):
+        return cmd_set_password()
     if cmd == "check":
         return cmd_check()
     if cmd == "setup":
