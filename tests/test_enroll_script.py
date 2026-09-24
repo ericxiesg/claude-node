@@ -82,4 +82,43 @@ if bash:
 else:
     print("4. --self / @session wiring present (bash absent; skipped behaviour run)")
 
+# 5. --proxy writes a per-account toggle; verify the emitted proxy.sh flips env
+assert "--proxy) PROXY_URL=" in rendered
+assert "vpsmcp-proxy()" in rendered and "proxy.state" in rendered
+assert 'vpsmcp/proxy.sh' in rendered              # sourced from the account rc
+if bash:
+    # Reproduce the proxy.sh the installer writes for a given URL and exercise it.
+    import tempfile
+    url = "http://node:secret@gw.example:8443"
+    home = tempfile.mkdtemp()
+    proxysh = rf'''
+      VPSMCP_GATEWAY_PROXY='{url}'
+      __vpsmcp_pstate="$HOME/.vpsmcp/proxy.state"
+      vpsmcp_proxy_apply() {{
+        if [ "$(cat "$__vpsmcp_pstate" 2>/dev/null)" = gateway ]; then
+          export http_proxy="$VPSMCP_GATEWAY_PROXY" https_proxy="$VPSMCP_GATEWAY_PROXY"
+        fi
+      }}
+      vpsmcp-proxy() {{
+        case "${{1:-status}}" in
+          on|gateway) echo gateway > "$__vpsmcp_pstate"; vpsmcp_proxy_apply;;
+          off|system) echo system > "$__vpsmcp_pstate"; unset http_proxy https_proxy;;
+          status) echo "$(cat "$__vpsmcp_pstate" 2>/dev/null || echo system)";;
+        esac
+      }}
+      vpsmcp_proxy_apply
+    '''
+    script = (f'export HOME={home}; mkdir -p $HOME/.vpsmcp; echo gateway > $HOME/.vpsmcp/proxy.state\n'
+              + proxysh
+              + '\necho "start=$http_proxy"\n'
+              + 'vpsmcp-proxy off >/dev/null; echo "off=[$http_proxy] state=$(vpsmcp-proxy status)"\n'
+              + 'vpsmcp-proxy on  >/dev/null; echo "on=[$http_proxy]"\n')
+    out = subprocess.run([bash, "-c", script], capture_output=True, text=True).stdout
+    assert f"start={url}" in out, out
+    assert "off=[] state=system" in out, out
+    assert f"on=[{url}]" in out, out
+    print("5. --proxy toggle: activated on deploy, flips gateway<->system per account")
+else:
+    print("5. --proxy wiring present (bash absent; skipped behaviour run)")
+
 print("\nall enroll-script checks passed")

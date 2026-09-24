@@ -171,6 +171,12 @@ password hash contains `$`.
 | `VPSMCP_MCP_PATH` | `/mcp` | resource URL = public_url + this |
 | `VPSMCP_BIND_HOST` / `_PORT` | `127.0.0.1` / `8848` | |
 | `VPSMCP_TRUSTED_PROXY_HOPS` | `1` | reverse proxies in front of the app; the client IP is taken this many entries from the right of `X-Forwarded-For`. `1` for one Caddy/nginx (the default setup), `2` behind a CDN or load balancer that also appends, `0` if the app is bound to a public port with no proxy (the header is then ignored). Getting this wrong does not expose data, but too high trusts a forged prefix and too low buckets every caller under the proxy |
+| `VPSMCP_PROXY_ENABLE` | `0` | run the egress forward proxy (`vpsmcp proxy` / `vpsmcp-proxy.service`) |
+| `VPSMCP_PROXY_PORT` / `_BIND_HOST` | `8443` / `0.0.0.0` | where the egress proxy listens |
+| `VPSMCP_PROXY_USER` | `node` | proxy username nodes authenticate with |
+| `VPSMCP_PROXY_PASS_HASH` | — | set with `vpsmcp proxy-password`; no hash = proxy refused to start |
+| `VPSMCP_PROXY_TLS_CERT` / `_KEY` | empty | terminate TLS on the proxy port (recommended, so Proxy-Authorization is not sent in clear); readable by the `vpsmcp` user |
+| `VPSMCP_PROXY_CONNECT_TIMEOUT` | `15` | upstream connect timeout, seconds |
 | `VPSMCP_DATA_DIR` | `/var/lib/vpsmcp` | keys, `oauth.db`, audit log |
 | `VPSMCP_INVENTORY` | `/etc/vpsmcp/hosts.yaml` | `hosts.d/` sits next to it |
 | `VPSMCP_AUDIT_LOG` | `$DATA_DIR/audit.jsonl` | |
@@ -202,6 +208,39 @@ password hash contains `$`.
 | `VPSMCP_ENABLE_CIMD` | `1` | client ID metadata documents |
 | `VPSMCP_ENABLE_GUARDRAILS` | `1` | command filter |
 | `VPSMCP_READ_ONLY` | `0` | emergency brake |
+
+## Egress proxy (optional)
+
+Nodes can route their outbound HTTP(S) through the gateway, giving the fleet one
+stable egress IP. It is off by default.
+
+**Gateway** — set a credential and start the service:
+
+```bash
+sudo vpsmcp proxy-password                 # sets VPSMCP_PROXY_PASS_HASH, enables it
+sudo systemctl enable --now vpsmcp-proxy   # listens on :8443
+```
+
+The proxy requires `Proxy-Authorization: Basic` on every request and refuses any
+destination that resolves to a private / loopback / link-local / reserved address
+(resolved once and pinned), so a node holding proxy creds cannot reach the
+gateway's own `127.0.0.1:8848`, its SSH, cloud metadata, or the internal network -
+only the public internet. Terminate TLS on the proxy port (`VPSMCP_PROXY_TLS_CERT`
+/`_KEY`) so the Basic credential is not sent in clear.
+
+**Node** — opt in at enrollment, then toggle per account:
+
+```bash
+curl -sSf https://mcp.example.com/enroll/install.sh | sudo bash -s -- \
+     --alias hk-main --proxy 'http://node:PASS@mcp.example.com:8443'
+vpsmcp-proxy status        # gateway | system
+vpsmcp-proxy off           # switch back to the node's system proxy
+vpsmcp-proxy on            # back to the gateway proxy
+```
+
+`--proxy` writes `~/.vpsmcp/proxy.sh` for the node account and sources it from that
+account's shell rc (per-account, not system-wide); egress is active on deploy and
+`vpsmcp-proxy` flips between the gateway proxy and the system default.
 
 ## Scopes
 

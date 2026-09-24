@@ -118,6 +118,22 @@ VPSMCP_ENROLL_KEY=<secret>
 VPSMCP_ENROLL_ALLOW_CIDRS=1.2.3.0/24
 ```
 
+## Egress proxy (optional)
+
+Let nodes egress through the gateway (one stable outbound IP). Off by default.
+
+```bash
+# gateway
+sudo vpsmcp proxy-password && sudo systemctl enable --now vpsmcp-proxy   # :8443
+# node (opt in at enrollment; switch anytime)
+... | sudo bash -s -- --alias hk --proxy 'http://node:PASS@mcp.example.com:8443'
+vpsmcp-proxy on|off|status
+```
+
+The proxy is authenticated and SSRF-guarded (it refuses private/loopback/internal
+targets, so proxy creds can't pivot into the gateway). Put TLS on the proxy port
+so the credential isn't sent in clear. See [Reference](docs/REFERENCE.md#egress-proxy-optional).
+
 ## 4. Manage
 
 ```bash
