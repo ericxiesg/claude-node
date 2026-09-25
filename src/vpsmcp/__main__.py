@@ -11,6 +11,7 @@
     vpsmcp node rename|tags|approve ...
     vpsmcp grants                   active OAuth grants
     vpsmcp revoke <client_id>       revoke a client and its tokens
+    vpsmcp unlock [ip]              clear the admin-login lockout (all IPs, or one)
     vpsmcp clients                  MCP clients this gateway accepts
     vpsmcp redirects                effective callback allowlist and refused callbacks
     vpsmcp redirect allow <uri>     allow one more callback, no restart
@@ -529,6 +530,27 @@ def cmd_grants() -> int:
     return 0
 
 
+def cmd_unlock(argv: list[str]) -> int:
+    """Clear the consent-page login lockout (login_attempts). Handy after too many
+    failed tries, or when a proxy/CDN buckets everyone under one IP."""
+    from .auth.store import Store
+
+    s = Settings.from_env()
+    store = Store(s.data_dir / "oauth.db")
+    ip = argv[2] if len(argv) > 2 else None
+    locks = store.login_locks()
+    if not locks:
+        print("no login lockouts recorded")
+        return 0
+    n = store.clear_login_locks(ip)
+    if ip:
+        print(f"cleared lockout for {ip} ({n} row(s))")
+    else:
+        print(f"cleared {n} login lockout(s): " +
+              ", ".join(f"{l['ip']}(fails={l['fails']})" for l in locks))
+    return 0
+
+
 def cmd_revoke(client_id: str) -> int:
     from .auth.store import Store
 
@@ -596,6 +618,8 @@ def _dispatch(cmd: str, argv: list[str]) -> int:
             print("usage: vpsmcp revoke <client_id>", file=sys.stderr)
             return 2
         return cmd_revoke(argv[2])
+    if cmd == "unlock":
+        return cmd_unlock(argv)
     print(__doc__)
     return 2
 

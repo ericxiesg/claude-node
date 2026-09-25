@@ -227,6 +227,18 @@ class Store:
     def login_ok(self, ip: str) -> None:
         self._x("DELETE FROM login_attempts WHERE ip=?", (ip,))
 
+    def clear_login_locks(self, ip: str | None = None) -> int:
+        """Clear the login lockout for one IP, or all of them. Returns rows removed."""
+        if ip:
+            return self._x("DELETE FROM login_attempts WHERE ip=?", (ip,)).rowcount
+        return self._x("DELETE FROM login_attempts").rowcount
+
+    def login_locks(self) -> list[dict]:
+        now = int(time.time())
+        return [{"ip": r["ip"], "fails": r["fails"],
+                 "locked_for_s": max(0, r["locked_until"] - now)}
+                for r in self._q("SELECT * FROM login_attempts ORDER BY locked_until DESC")]
+
     # ---------- redirect allowlist ----------
     def allow_redirect(self, prefix: str, note: str = "") -> None:
         self._x("INSERT OR REPLACE INTO redirect_allow(prefix,note,created_at) VALUES(?,?,?)",

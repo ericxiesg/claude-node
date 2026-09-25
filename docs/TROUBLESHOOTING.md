@@ -335,7 +335,7 @@ password - clear it and check `VPSMCP_TRUSTED_PROXY_HOPS` matches your proxy
 chain:
 
 ```bash
-sudo -u vpsmcp /opt/vpsmcp/.venv/bin/python -c "import sqlite3;c=sqlite3.connect('/var/lib/vpsmcp/oauth.db');c.execute('DELETE FROM login_attempts');c.commit()"
+sudo vpsmcp unlock          # clear all login lockouts (or: sudo vpsmcp unlock <ip>)
 ```
 
 ### The `$` in the hash

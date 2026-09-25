@@ -16,6 +16,7 @@ sudo vpsmcp nodes --json
 sudo vpsmcp hosts                 # TSV inventory, for scripts
 sudo vpsmcp grants                # who holds a valid grant
 sudo vpsmcp revoke <client_id>    # revoke a client and all its tokens
+sudo vpsmcp unlock [ip]           # clear the admin-login lockout (all, or one IP)
 sudo vpsmcp clients               # MCP clients accepted (Claude, Kimi, GLM, ...)
 sudo vpsmcp redirects             # callback allowlist + callbacks turned away
 sudo vpsmcp redirect allow <uri>  # accept one more client, no restart
