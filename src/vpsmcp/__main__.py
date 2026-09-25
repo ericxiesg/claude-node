@@ -205,9 +205,19 @@ def cmd_proxy_password() -> int:
     print(f"wrote VPSMCP_PROXY_PASS_HASH and VPSMCP_PROXY_ENABLE=1 in {path}")
     if Path("/run/systemd/system").is_dir():
         import subprocess
-        subprocess.run(["systemctl", "restart", "vpsmcp-proxy"])
-        print("restarted vpsmcp-proxy (enable it first with: "
-              "sudo systemctl enable --now vpsmcp-proxy)")
+        unit = Path("/etc/systemd/system/vpsmcp-proxy.service")
+        if not unit.exists():
+            print("the vpsmcp-proxy unit is not installed yet; install it, then enable:\n"
+                  "    sudo deploy/upgrade.sh --fast   # (or vpsmcp setup) installs the unit\n"
+                  "    sudo systemctl enable --now vpsmcp-proxy")
+            return 0
+        active = subprocess.run(["systemctl", "is-active", "--quiet", "vpsmcp-proxy"]).returncode == 0
+        if active:
+            r = subprocess.run(["systemctl", "restart", "vpsmcp-proxy"])
+            print("restarted vpsmcp-proxy; the new password is live" if r.returncode == 0
+                  else "wrote the hash, but restart failed; check: journalctl -u vpsmcp-proxy")
+        else:
+            print("now start it: sudo systemctl enable --now vpsmcp-proxy")
     else:
         print("now start it: sudo systemctl enable --now vpsmcp-proxy")
     return 0
