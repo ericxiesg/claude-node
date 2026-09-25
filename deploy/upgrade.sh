@@ -95,6 +95,13 @@ else
   "$VENV/bin/pip" install "${PIP_Q[@]}" --upgrade "$APP"
 fi
 install -m 755 "$SRC/deploy/vpsmcp-wrapper" /usr/local/bin/vpsmcp 2>/dev/null || true
+# Refresh the optional egress-proxy unit so existing installs (which upgrade,
+# not re-run setup) pick it up. Not enabled here - that needs a proxy password.
+if [[ -d /etc/systemd/system && -f "$SRC/deploy/vpsmcp-proxy.service" ]]; then
+  install -m 644 "$SRC/deploy/vpsmcp-proxy.service" \
+    /etc/systemd/system/vpsmcp-proxy.service 2>/dev/null \
+    && systemctl daemon-reload 2>/dev/null || true
+fi
 chown -R vpsmcp:vpsmcp "$APP"
 find "$APP" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 echo "==> version $(cur_ver)"
